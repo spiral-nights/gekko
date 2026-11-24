@@ -962,7 +962,7 @@ pub fn scaffold_init_and_clean_e2e_test() {
     toml,
     "gekko_stdlib = { git = \"https://github.com/spiral-nights/gekko_stdlib.git\", ref = \"main\" }",
   )
-  assert string.contains(toml, "[tools.gekko.shims]")
+  assert string.contains(toml, "[tools.gekko.use_shims]")
   assert string.contains(toml, "gleam_stdlib = \"gekko_stdlib\"")
 
   // Refuses to overwrite existing gleam.toml

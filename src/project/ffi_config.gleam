@@ -15,7 +15,7 @@ import project/prepass.{
 import simplifile
 import tom.{type Toml}
 
-/// Metadata declared in `[shim]` identifying the target package and SemVer range.
+/// Metadata declared in `[tools.gekko.shim_for]` identifying the target package and SemVer range.
 pub type ShimMeta {
   ShimMeta(target: String, version: Option(String))
 }
@@ -198,6 +198,7 @@ pub fn load_project_moonbit_deps(
   |> insert_all(from_gleam)
   |> insert_all(from_gekko)
   |> insert_all(from_moon_mod)
+  |> dict.delete("gekko/gprelude")
   |> sort_dep_pairs
   |> Ok
 }
@@ -807,7 +808,7 @@ fn format_get_error(err: tom.GetError) -> String {
 // Overlay & Shim Parsers (`[shim]`, `[type_overrides]`, `[module_inject]`, `[target_branch]`)
 // -----------------------------------------------------------------------------
 
-/// Parse `[shim]` metadata from a `gekko.toml` string.
+/// Parse `[shim_for]` metadata from a `gekko.toml` string.
 pub fn parse_shim_gekko_toml(
   content: String,
 ) -> Result(Option(ShimMeta), String) {
@@ -815,10 +816,10 @@ pub fn parse_shim_gekko_toml(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  extract_shim_meta(parsed, ["shim"])
+  extract_shim_meta(parsed, ["shim_for"])
 }
 
-/// Parse `[tools.gekko.shim]` metadata from a `gleam.toml` string.
+/// Parse `[tools.gekko.shim_for]` metadata from a `gleam.toml` string.
 pub fn parse_shim_gleam_toml(
   content: String,
 ) -> Result(Option(ShimMeta), String) {
@@ -826,7 +827,7 @@ pub fn parse_shim_gleam_toml(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  extract_shim_meta(parsed, ["tools", "gekko", "shim"])
+  extract_shim_meta(parsed, ["tools", "gekko", "shim_for"])
 }
 
 fn extract_shim_meta(
@@ -837,14 +838,14 @@ fn extract_shim_meta(
     Error(tom.NotFound(_)) -> Ok(None)
     Error(err) -> Error(format_get_error(err))
     Ok(table) -> {
-      use target <- result.try(case dict.get(table, "target") {
+      use target <- result.try(case dict.get(table, "package") {
         Ok(tom.String(t)) ->
           case string.trim(t) {
-            "" -> Error("Shim 'target' must not be empty")
+            "" -> Error("Shim 'package' must not be empty")
             trimmed -> Ok(trimmed)
           }
-        Ok(_) -> Error("Shim 'target' must be String")
-        Error(_) -> Error("Shim section must specify 'target'")
+        Ok(_) -> Error("Shim 'package' must be String")
+        Error(_) -> Error("[tools.gekko.shim_for] must specify 'package'")
       })
       use version <- result.try(case dict.get(table, "version") {
         Error(_) -> Ok(None)
@@ -1238,7 +1239,7 @@ fn collect_nested_entries(
   })
 }
 
-/// Parse `[shims]` authorization allowlist from a `gekko.toml` string.
+/// Parse `[use_shims]` authorization allowlist from a `gekko.toml` string.
 pub fn parse_authorized_shims_gekko_toml(
   content: String,
 ) -> Result(Dict(String, String), String) {
@@ -1246,10 +1247,10 @@ pub fn parse_authorized_shims_gekko_toml(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  extract_authorized_shims(parsed, ["shims"])
+  extract_authorized_shims(parsed, ["use_shims"])
 }
 
-/// Parse `[tools.gekko.shims]` authorization allowlist from a `gleam.toml` string.
+/// Parse `[tools.gekko.use_shims]` authorization allowlist from a `gleam.toml` string.
 pub fn parse_authorized_shims_gleam_toml(
   content: String,
 ) -> Result(Dict(String, String), String) {
@@ -1257,7 +1258,7 @@ pub fn parse_authorized_shims_gleam_toml(
     tom.parse(content)
     |> result.map_error(format_parse_error),
   )
-  extract_authorized_shims(parsed, ["tools", "gekko", "shims"])
+  extract_authorized_shims(parsed, ["tools", "gekko", "use_shims"])
 }
 
 fn extract_authorized_shims(
@@ -1293,7 +1294,7 @@ fn extract_authorized_shims(
   }
 }
 
-/// Load and merge all overlay sections (`shim`, `shims`, `overrides`, `type_overrides`,
+/// Load and merge all overlay sections (`shim_for`, `use_shims`, `overrides`, `type_overrides`,
 /// `patch`, `target_branch`) from a package's `gleam.toml` and `gekko.toml`.
 pub fn load_package_overlay(
   pkg_root: String,
@@ -1678,7 +1679,7 @@ fn validate_dep_overlay_scope(
       Error(
         "Security error: dependency '"
         <> dep.source_pkg
-        <> "' defines gekko patches or overrides without declaring [tools.gekko.shim] target = \"<pkg>\" in gleam.toml",
+        <> "' defines gekko patches or overrides without declaring [tools.gekko.shim_for] package = \"<pkg>\" in gleam.toml",
       )
     True, Some(ShimMeta(target:, ..)) -> {
       use _ <- result.try(case dict.get(root_authorized_shims, target) {
@@ -1687,21 +1688,21 @@ fn validate_dep_overlay_scope(
           Error(
             "Security error: dependency '"
             <> dep.source_pkg
-            <> "' declares a shim targeting '"
+            <> "' declares [tools.gekko.shim_for] for '"
             <> target
             <> "', but root gleam.toml authorizes '"
             <> other_shim
             <> "' for '"
             <> target
-            <> "' in [tools.gekko.shims]",
+            <> "' in [tools.gekko.use_shims]",
           )
         Error(_) ->
           Error(
             "Security error: dependency '"
             <> dep.source_pkg
-            <> "' declares a shim targeting '"
+            <> "' declares [tools.gekko.shim_for] for '"
             <> target
-            <> "', but is not authorized in root gleam.toml.\nTo allow this shim, add to your root gleam.toml:\n\n  [tools.gekko.shims]\n  "
+            <> "', but is not enabled in root gleam.toml.\nTo allow and use this shim, add to your root gleam.toml:\n\n  [tools.gekko.use_shims]\n  "
             <> target
             <> " = \""
             <> dep.source_pkg
@@ -1720,7 +1721,7 @@ fn validate_dep_overlay_scope(
               Error(
                 "Security error: shim dependency '"
                 <> dep.source_pkg
-                <> "' declares target '"
+                <> "' declares [tools.gekko.shim_for] package '"
                 <> target
                 <> "' and cannot patch/override '"
                 <> k
@@ -1812,7 +1813,7 @@ pub fn check_shim_versions(
   |> result.map(fn(opts) { list.filter_map(opts, option.to_result(_, Nil)) })
 }
 
-/// Warn if any shim package authorized in root `[tools.gekko.shims]` is not a
+/// Warn if any shim package enabled in root `[tools.gekko.use_shims]` is not a
 /// resolved dependency of the project.
 pub fn check_authorized_shims(
   authorized_shims: Dict(String, String),
@@ -1825,7 +1826,7 @@ pub fn check_authorized_shims(
       True -> Error(Nil)
       False ->
         Ok(
-          "Warning: [tools.gekko.shims] authorizes '"
+          "Warning: [tools.gekko.use_shims] enables '"
           <> shim_pkg
           <> "' for '"
           <> target_pkg

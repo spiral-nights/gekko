@@ -17,8 +17,8 @@ import simplifile
 pub fn parse_overlay_sections_gekko_and_gleam_toml_test() {
   let gekko_toml =
     "
-[shim]
-target = \"simplifile\"
+[shim_for]
+package = \"simplifile\"
 version = \">= 2.0.0 and < 3.0.0\"
 
 [type_overrides.\"simplifile:simplifile.FileInfo\"]
@@ -87,8 +87,8 @@ prefer = \"javascript\"
 name = \"my_shim\"
 version = \"0.1.0\"
 
-[tools.gekko.shim]
-target = \"simplifile\"
+[tools.gekko.shim_for]
+package = \"simplifile\"
 version = \"~> 2.1\"
 
 [tools.gekko.type_overrides.\"simplifile:simplifile.FileInfo\"]
@@ -273,18 +273,18 @@ pub fn multi_error_unmapped_externals_and_shim_cli_test() {
   assert string.contains(report, "raw_lib.OpaqueHandle")
   assert string.contains(report, "raw_lib.first")
   assert string.contains(report, "raw_lib.second")
-  assert string.contains(report, "[tools.gekko.shim]")
+  assert string.contains(report, "[tools.gekko.shim_for]")
   assert string.contains(report, "#gekko.patch")
 
-  // `gekko shim init raw_lib` scaffolds [tools.gekko.shim] in gleam.toml and
+  // `gekko shim init raw_lib` scaffolds [tools.gekko.shim_for] in gleam.toml and
   // #gekko.patch stubs in patches/<mod>/ without creating gekko.toml
   let shim_out = filepath.join(root, "gekko_raw_lib")
   let assert Ok(_) = shim_cli.init_shim(root, "raw_lib", Some(shim_out))
   assert simplifile.is_file(filepath.join(shim_out, "gekko.toml")) != Ok(True)
   let assert Ok(shim_toml) =
     simplifile.read(filepath.join(shim_out, "gleam.toml"))
-  assert string.contains(shim_toml, "[tools.gekko.shim]")
-  assert string.contains(shim_toml, "target = \"raw_lib\"")
+  assert string.contains(shim_toml, "[tools.gekko.shim_for]")
+  assert string.contains(shim_toml, "package = \"raw_lib\"")
   assert string.contains(shim_toml, ">= 1.0.0 and < 2.0.0")
   assert simplifile.is_file(filepath.join(shim_out, "patches/raw_lib/moon.pkg"))
     == Ok(True)
@@ -338,7 +338,7 @@ pub fn companion_shim_end_to_end_moon_test() {
   //    + moon.pkg + #gekko.patch attributes
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
-      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 1.0.0 and < 2.0.0\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 1.0.0 and < 2.0.0\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -353,10 +353,10 @@ pub fn companion_shim_end_to_end_moon_test() {
     == Ok(Nil)
 
   // 3. Root app depending on BOTH unmodified upstream_lib and gekko_upstream_lib,
-  //    authorizing gekko_upstream_lib in [tools.gekko.shims]
+  //    authorizing gekko_upstream_lib in [tools.gekko.use_shims]
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nupstream_lib = { path = \"deps/upstream_lib\" }\ngekko_upstream_lib = { path = \"deps/gekko_upstream_lib\" }\n\n[tools.gekko.shims]\nupstream_lib = \"gekko_upstream_lib\"\n",
+      contents: "name = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nupstream_lib = { path = \"deps/upstream_lib\" }\ngekko_upstream_lib = { path = \"deps/gekko_upstream_lib\" }\n\n[tools.gekko.use_shims]\nupstream_lib = \"gekko_upstream_lib\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -388,7 +388,7 @@ pub fn companion_shim_end_to_end_moon_test() {
   // 4. Verify stale patch file cleanup + version mismatch & stale override warnings
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
-      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]\npackage = \"upstream_ffi\"\nfunction = \"nope\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]\npackage = \"upstream_ffi\"\nfunction = \"nope\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   let assert Ok(summary2) = workspace.transpile_project(root, out_dir)
@@ -403,7 +403,7 @@ pub fn companion_shim_end_to_end_moon_test() {
   let _ = simplifile.delete(file_or_dir_at: filepath.join(shim_dir, "patches"))
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
-      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.type_overrides.\"upstream_lib:upstream_lib.Handle\"]\npackage = \"gprelude\"\ntype = \"Dynamic\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.make_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.read_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.type_overrides.\"upstream_lib:upstream_lib.Handle\"]\npackage = \"gprelude\"\ntype = \"Dynamic\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.make_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.read_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   let _ = workspace.transpile_project(root, out_dir)
@@ -560,7 +560,7 @@ pub fn dependency_overlay_security_scoping_test() {
     )
   }
 
-  // 1. Dependency with overrides and NO [tools.gekko.shim] must fail
+  // 1. Dependency with overrides and NO [tools.gekko.shim_for] must fail
   let rogue_dep =
     ffi_config.PackageOverlay(
       ..empty_ov("rogue"),
@@ -573,8 +573,8 @@ pub fn dependency_overlay_security_scoping_test() {
   assert string.contains(no_shim_err, "Security error")
   assert string.contains(no_shim_err, "rogue")
 
-  // 2. Dependency declaring [tools.gekko.shim] target = "gleam_crypto" NOT in root
-  //    [tools.gekko.shims] must fail with copy-pasteable [tools.gekko.shims] hint
+  // 2. Dependency declaring [tools.gekko.shim_for] package = "gleam_crypto" NOT in root
+  //    [tools.gekko.use_shims] must fail with copy-pasteable [tools.gekko.use_shims] hint
   let unauth_dep =
     ffi_config.PackageOverlay(
       ..empty_ov("evil_dep"),
@@ -586,7 +586,7 @@ pub fn dependency_overlay_security_scoping_test() {
   let assert Error(unauth_err) =
     ffi_config.merge_overlays([unauth_dep], empty_ov("app"))
   assert string.contains(unauth_err, "Security error")
-  assert string.contains(unauth_err, "[tools.gekko.shims]")
+  assert string.contains(unauth_err, "[tools.gekko.use_shims]")
   assert string.contains(unauth_err, "gleam_crypto = \"evil_dep\"")
 
   // 3. Dependency targeting pkg_a when root authorized "other_shim" must fail
@@ -628,7 +628,7 @@ pub fn dependency_overlay_security_scoping_test() {
   assert string.contains(cross_err, "pkg_a")
   assert string.contains(cross_err, "pkg_b:pkg_b.fn1")
 
-  // 5. Dependency declaring [tools.gekko.shims] cannot authorize itself or another dep
+  // 5. Dependency declaring [tools.gekko.use_shims] cannot authorize itself or another dep
   let self_auth_dep =
     ffi_config.PackageOverlay(
       ..empty_ov("evil_dep"),
@@ -642,7 +642,7 @@ pub fn dependency_overlay_security_scoping_test() {
     ffi_config.merge_overlays([self_auth_dep], empty_ov("app"))
   assert string.contains(self_auth_err, "Security error")
 
-  // 6. Root project without [tools.gekko.shims] can override any package
+  // 6. Root project without [tools.gekko.use_shims] can override any package
   let root_ov =
     ffi_config.PackageOverlay(
       ..empty_ov("app"),

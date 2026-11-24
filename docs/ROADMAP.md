@@ -71,8 +71,8 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 
 ### Deliverables
 - [x] **`src/project/loader.gleam`**: Parse `manifest.toml` and `build/packages/*/gleam.toml` in topological order, transpile pure-Gleam Hex dependencies, and fail fast with `package:module.function` + `file:line:col` errors when externals are unmapped.
-- [x] **Companion `gleam_stdlib` shim (`gekko_stdlib`):** Transpiles unmodified upstream Hex `gleam_stdlib` with co-located `[patch]` MoonBit implementations (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/string_tree`, `gleam/uri`, etc.).
-- [x] **Companion `gleam_json` shim (`gekko_json`):** Transpiles unmodified upstream Hex `gleam_json` with a co-located `[patch]` MoonBit implementation backed by `moonbitlang/core/json`.
+- [x] **Companion `gleam_stdlib` shim (`gekko_stdlib`):** Transpiles unmodified upstream Hex `gleam_stdlib` with co-located `patches/` (`#gekko.patch`) MoonBit implementations (`gleam/string`, `gleam/int`, `gleam/float`, `gleam/dict`, `gleam/bit_array`, `gleam/dynamic/decode`, `gleam/io`, `gleam/string_tree`, `gleam/uri`, etc.).
+- [x] **Companion `gleam_json` shim (`gekko_json`):** Transpiles unmodified upstream Hex `gleam_json` with a co-located `patches/` (`#gekko.patch`) MoonBit implementation backed by `moonbitlang/core/json`.
 
 ### Verification Gate
 - Transpile non-trivial Gleam projects importing `gleam_stdlib`, `gleam_json`, and pure-Gleam third-party Hex packages.
@@ -102,7 +102,7 @@ This roadmap organizes the build-out of `gekko` into six sequential, test-gated 
 - [x] **Source-Mapped Diagnostics:** Emit `.gekko_sourcemap` and annotate `moon` compiler errors with originating `.gleam` file/line hints, plus `file:line:col` range and unmapped-external diagnostics.
 - [x] **Collision-Free Package Mapping & Incremental Builds:** Deterministic `resolve_module_pkg_dirs` disambiguation, write-if-changed emission, and parallel dependency interface extraction.
 - [ ] **Mutual Tail Recursion & Exported WIT Resources:** Lower mutually recursive tail calls on linear `wasm` / `js` / `native` and support exporting WIT `resource` handles.
-- [x] **Upstream Hex FFI Overlay Packs:** Companion shim packages (`[shim]`, `[patch]`, `[type_overrides]`, `[overrides]`, `[target_branch]`, `gekko shim inspect|init` — see [`docs/SHIMS.md`](./SHIMS.md)) allowing unmodified upstream Hex packages to be transpiled without forking.
+- [x] **Upstream Hex FFI Overlay Packs:** Companion shim packages (`[tools.gekko.use_shims]`, `[tools.gekko.shim_for]`, `patches/` + `#gekko.patch`, `[tools.gekko.target_branch]`, `gekko shim inspect|init` — see [`docs/SHIMS.md`](./SHIMS.md)) allowing unmodified upstream Hex packages to be transpiled without forking.
 
 ### Verification Gate
 - Comprehensive golden test suite passes cleanly across `wasm-gc`, `wasm`, `js`, `native`, and Wasm Component targets with zero `moon check` warnings.

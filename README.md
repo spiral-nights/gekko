@@ -39,7 +39,7 @@ flowchart TD
 2. **Uniform Enums & Uniform Getters:** Every Gleam custom type—single-variant or multi-variant—compiles to a MoonBit `pub(all) enum` with synthesized `.field()` getter methods, eliminating constructor/pattern syntax splits and receiver-type ambiguity at dot-access sites.
 3. **Functional `for` Loop TCO:** Self-tail-recursive Gleam functions lower to MoonBit functional `for` state loops (`for a = a, b = b { ... => continue ... }`), guaranteeing $O(1)$ stack space across all MoonBit targets (`wasm-gc`, `wasm`, `js`, `native`).
 4. **Persistent Lists (`GList[T]`):** Gleam `List(a)` maps to a persistent singly-linked `@prelude.GList[T]` (`Nil` / `Cons`) instead of MoonBit's mutable `Array[T]`, preserving $O(1)$ prepends and pattern deconstruction.
-5. **Companion Shim Overlays (`gekko_stdlib` & `gekko_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler or maintaining forks, `gekko` transpiles unmodified upstream [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) from `build/packages/`, applying co-located `[patch]` MoonBit implementations from [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json).
+5. **Companion Shim Overlays (`gekko_stdlib` & `gekko_json`):** Instead of hardcoding standard-library or JSON shims inside the compiler or maintaining forks, `gekko` transpiles unmodified upstream [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) from `build/packages/`, applying co-located `patches/` (`#gekko.patch`) MoonBit implementations from [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json).
 
 ---
 
@@ -84,7 +84,7 @@ gekko wit build --release  # outputs dist/app.wasm
 
 ## Project Setup (`gleam.toml`)
 
-Target projects depend on unmodified upstream Hex `gleam_stdlib` (and `gleam_json`, if used) alongside their companion shim packages in `gleam.toml`:
+Target projects depend on unmodified upstream Hex `gleam_stdlib` (and `gleam_json`, if used) alongside their companion shim packages, and explicitly enable them under `[tools.gekko.use_shims]` in `gleam.toml`:
 
 ```toml
 [dependencies]
@@ -92,9 +92,13 @@ gleam_stdlib = ">= 1.0.0 and < 2.0.0"
 gleam_json = ">= 3.0.0 and < 4.0.0"
 gekko_stdlib = { git = "https://github.com/spiral-nights/gekko_stdlib.git", ref = "main" }
 gekko_json = { git = "https://github.com/spiral-nights/gekko_json.git", ref = "main" }
+
+[tools.gekko.use_shims]
+gleam_stdlib = "gekko_stdlib"
+gleam_json = "gekko_json"
 ```
 
-Your application and transitive Hex dependencies resolve against standard upstream `gleam_stdlib` and `gleam_json`, while `gekko` automatically applies the companion shims' `[patch]` and `[overrides]` entries during MoonBit transpilation.
+Your application and transitive Hex dependencies resolve against standard upstream `gleam_stdlib` and `gleam_json`, while `gekko` applies the enabled companion shims' `patches/` during MoonBit transpilation. See **[`docs/GUIDE.md`](./docs/GUIDE.md)** for the full authoring walkthrough.
 
 ---
 
@@ -179,129 +183,25 @@ gekko --help
 
 ## WebAssembly Components (`gekko wit`)
 
-While `gekko build --target wasm` produces a standalone core WebAssembly module (`wasi_snapshot_preview1` / `pub fn main()`), the `gekko wit` commands compile a Gleam library or application against a [WIT (WebAssembly Interface Types)](https://component-model.bytecodealliance.org/design/wit.html) schema (`wit/*.wit`) and package it into a **WASI 0.2 / Component Model** `.wasm` component with typed host imports and exports.
-
-> **Prerequisites for `gekko wit`:**
-> - `gekko wit gen` requires no external tools (uses `gekko`'s built-in WIT parser).
-> - `gekko wit check` additionally requires [`wit-bindgen`](https://github.com/bytecodealliance/wit-bindgen) (`cargo install wit-bindgen-cli`).
-> - `gekko wit build` additionally requires [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) (`cargo install wasm-tools`).
-
-### The 3-Step `gekko wit` Workflow
-
-Suppose your project has a WIT file at `wit/world.wit` defining a `world` with imported host interfaces (e.g. `import logger;`) and exported interfaces or functions (e.g. `export api;`, `export ping: func(x: s32) -> s32;`):
-
-#### 1. `gekko wit gen` — Generate Gleam types, import bindings, and export stubs
+Compile a Gleam library or application against a [WIT (WebAssembly Interface Types)](https://component-model.bytecodealliance.org/design/wit.html) schema (`wit/*.wit`) and package it into a **WASI 0.2 / Component Model** `.wasm` component:
 
 ```bash
-gekko wit gen [--root <dir>] [--wit <dir>] [--world <name>]
+gekko wit gen               # generates src/wit/*.gleam bindings + starter src/<iface>.gleam stubs
+gekko wit check             # transpiles, runs wit-bindgen moonbit, and type-checks
+gekko wit build --release   # bundles dist/<world>.wasm via wasm-tools
 ```
 
-Parses `<root>/wit/*.wit` (or `--wit <dir>`) and generates Gleam source files under `<root>/src/`:
-
-- **`src/wit/<iface>_types.gleam` *(auto-regenerated — do not edit)*:** Gleam custom types for WIT `record`, `variant`, `enum`, `flags`, `type` aliases, and imported `resource` handles (`/// @external_type(moonbit, ...)`), with WIT `list<u8>` mapped to `BitArray`, `list<T>` to `List(T)`, `option<T>` to `Option(T)`, `result<T, E>` to `Result(T, E)`, integer types to `Int`, and floats to `Float`.
-- **`src/wit/<iface>.gleam` *(auto-regenerated — do not edit)*:** Callable Gleam functions for every WIT `import` (including imported `resource` constructors, methods, static methods, and `drop_<resource>`), wired via `/// @external(moonbit, ...)` to the generated Canonical ABI import adapters.
-- **`src/<iface>.gleam` / `src/<world>.gleam` *(created once — safe to edit)*:** Starter Gleam modules containing `todo` stubs with the exact function signatures required for each exported WIT interface or world-level function. World `include` composition (including `with` renames) is resolved automatically. Re-running `gekko wit gen` after updating your `.wit` file refreshes `src/wit/*.gleam` without overwriting your implementations in `src/<iface>.gleam`.
-
-#### 2. `gekko wit check` — Bridge and type-check the MoonBit + WIT workspace
-
-```bash
-gekko wit check [--root <dir>] [--wit <dir>] [--world <name>] [--out <dir>]
-```
-
-Validates that your Gleam export implementations match the WIT contract and type-checks the full generated workspace (`<root>/build/moonbit` by default):
-
-1. Transpiles your Gleam project and dependencies to MoonBit.
-2. Runs `wit-bindgen moonbit` on the WIT directory to emit low-level Canonical ABI FFI glue.
-3. Generates MoonBit adapter packages that convert between `gekko`'s Gleam representation (`Int64`, `GList[T]`, `BitArray`, uniform enums) and `wit-bindgen`'s MoonBit types (`Int`, `UInt`, `FixedArray[T]`, `Bytes`, etc.) for both imports and exports.
-4. Runs `moon check --target wasm` to verify that all types and signatures match.
-
-#### 3. `gekko wit build` — Compile and bundle the `.wasm` Component
-
-```bash
-gekko wit build [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--output <file.wasm> | -o <file.wasm>]
-```
-
-Performs the full bridge pipeline from `gekko wit check`, then:
-
-1. Compiles the core linear-memory Wasm module via `moon build [--release] --target wasm`.
-2. Embeds the WIT component type metadata into the core Wasm binary via `wasm-tools component embed --encoding utf16`.
-3. Wraps the embedded module into a WebAssembly Component via `wasm-tools component new`, writing the final component to `<root>/dist/<world>.wasm` by default (or to the path passed via `--output` / `-o`).
-
-You can inspect the resulting component's typed interface with:
-
-```bash
-wasm-tools component wit dist/<world>.wasm
-```
-
-### Common `gekko wit` Flags
-
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--root <dir>` | `.` | Path to the Gleam project root directory. |
-| `--wit <dir>` | `<root>/wit` | Directory containing `.wit` files. |
-| `--world <name>` | Only world in `--wit` | Selects which WIT `world` to target when multiple worlds exist. |
-| `--output <file>`, `-o <file>` | `<root>/dist/<world>.wasm` | Output `.wasm` file path for `gekko wit build`. |
-| `--work-dir <dir>` | `<root>/build/moonbit` | Intermediate MoonBit workspace directory (`wit check` / `wit build`). |
-| `--release` | `false` | Build the core Wasm module in release mode (`wit build`). |
+Prerequisites for `gekko wit`: [`wit-bindgen`](https://github.com/bytecodealliance/wit-bindgen) (`gekko wit check` / `build`) and [`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) (`gekko wit build`). See **[`docs/GUIDE.md`](./docs/GUIDE.md#5-building-a-webassembly-component-gekko-wit)** for the full workflow and file ownership rules.
 
 ---
 
-## MoonBit FFI, Types, Dependencies & Overrides
+## MoonBit FFI & Companion Shims
 
-Target projects can interoperate with MoonBit code without breaking `gleam check`:
+- **Bind existing MoonBit packages:** Declare dependencies in `moonbit/moon.mod` and run `gekko moonbit bind <pkg>` to generate `src/ffi/<pkg>.gleam` and any needed `moonbit/<pkg>_adapter/`.
+- **Write custom MoonBit FFI:** Place `.mbt` packages under `moonbit/<pkg>/` and bind them with `/// @external(moonbit, "<pkg>", "<fn>")` / `/// @external_type(moonbit, "<pkg>", "<Type>")` so standard `gleam check` stays green. Add `"gekko/gprelude@0.1.0"` to `moonbit/moon.mod` and `"gekko/gprelude" @gprelude` to `moon.pkg` for automatic `moon.work` LSP support.
+- **Shim unmodified Hex packages:** Use `gekko shim inspect <pkg>` and `gekko shim init <pkg>` to scaffold a companion shim with `[tools.gekko.shim_for]` and `patches/<mod>/` (`#gekko.patch`), then enable it in your app's `[tools.gekko.use_shims]`.
 
-### 1. Local `moonbit/` Packages & `@external` / `@external_type` Pragmas
-
-Place local MoonBit packages in `<project_root>/moonbit/<pkg>/`. When `moon.pkg` is omitted, `gekko` auto-generates one importing `<project_name>/gprelude`.
-
-```gleam
-/// @external_type(moonbit, "text_ffi", "Counter")
-pub type Counter
-
-/// @external(moonbit, "text_ffi", "read_counter")
-pub fn read_counter(c: Counter) -> Int {
-  let _ = c
-  panic as "Implemented in MoonBit"
-}
-```
-
-### 2. Automatic Binding Generation (`gekko moonbit bind`)
-
-Generate Gleam stubs (`src/ffi/<pkg>.gleam`) and any needed MoonBit adapter (`moonbit/<pkg>_adapter/`) directly from a standard-library, local, or `moonbit/moon.mod` dependency package:
-
-```bash
-gekko moonbit bind moonbitlang/x/fs --root examples/file_io
-```
-
-### 3. Third-Party MoonBit Dependencies (`moonbit/moon.mod`)
-
-Declare registry dependencies in `<project_root>/moonbit/moon.mod` using MoonBit's native manifest format (you can also manage it with `moon -C moonbit add <pkg>`):
-
-```moonbit
-// moonbit/moon.mod
-name = "file_io"
-version = "0.1.0"
-
-import {
-  "moonbitlang/x@0.5.7",
-}
-```
-
-### 4. Raw `@external(moonbit, ...)` & Companion Shim Overlays
-
-```gleam
-@external(moonbit, "my_org/math", "fast_sqrt")
-pub fn fast_sqrt(x: Float) -> Float
-```
-
-To use **unmodified third-party Hex packages** that contain Erlang/JS externals without forking them, `gekko` supports **companion shim / overlay packages** (`[tools.gekko.shims]` in your root `gleam.toml` + `patches/` in the shim):
-
-- **`[tools.gekko.shims]`** *(in root `gleam.toml`)*: Explicit allowlist authorizing which shim package may patch each target dependency (`gleam_stdlib = "gekko_stdlib"`).
-- **`[tools.gekko.shim]`** *(in shim `gleam.toml`)*: Declares the target package and SemVer range (`target`, `version`).
-- **`patches/` + `#gekko.patch`**: Co-locates `.mbt` patch files (and `moon.pkg` imports) directly inside the transpiled module's MoonBit package—supporting functions, types, and `pub type Alias = Target` type aliases while eliminating circular package dependencies.
-- **`[tools.gekko.target_branch."pkg:mod"]`**: Optional selector for `prefer = "javascript"` or `"erlang"` on `@target(...)` blocks.
-
-Use `gekko shim inspect <pkg>` and `gekko shim init <pkg>` to audit a dependency and scaffold a typed shim skeleton. See **[`docs/SHIMS.md`](./docs/SHIMS.md)** for the full guide and configuration reference.
+See **[`docs/GUIDE.md`](./docs/GUIDE.md)** for step-by-step authoring recipes and **[`docs/SHIMS.md`](./docs/SHIMS.md)** for the full shim configuration reference.
 
 ---
 
@@ -327,8 +227,9 @@ Standalone example projects are hosted in [`gekko_examples`](https://github.com/
 
 ## Project Documentation
 
+- **[`docs/GUIDE.md`](./docs/GUIDE.md)** — Authoring guide: apps, MoonBit FFI, LSP setup (`moon.work`), companion shims, WIT components, and `@gprelude` type cheat sheet.
+- **[`docs/SHIMS.md`](./docs/SHIMS.md)** — Companion shim & overlay reference (`[tools.gekko.use_shims]`, `[tools.gekko.shim_for]`, `patches/` + `#gekko.patch`, `[tools.gekko.target_branch]`, `gekko shim`).
 - **[`docs/SPEC.md`](./docs/SPEC.md)** — Full architectural specification, lowering rules, runtime design, and WIT bridge details.
-- **[`docs/SHIMS.md`](./docs/SHIMS.md)** — Companion shim & overlay packages guide (`[shim]`, `[patch]`, `[type_overrides]`, `[overrides]`, `[target_branch]`, `gekko shim`).
 - **[`docs/SEMANTICS.md`](./docs/SEMANTICS.md)** — Runtime semantics, target behavior, and documented differences from Erlang/JS Gleam.
 - **[`docs/ROADMAP.md`](./docs/ROADMAP.md)** — Phased implementation plan, deliverables, and verification gates.
 - **[`docs/GLEAM_SYNTAX_MAP.md`](./docs/GLEAM_SYNTAX_MAP.md)** — Complete mapping from `glance` AST nodes to MoonBit lowering rules.

@@ -1056,7 +1056,7 @@ pub fn emit_adapter_moon_pkg(
     dict.new()
     |> dict.insert(bctx.mbti.package_name, bctx.target_alias)
   let base = case needs_gprelude {
-    True -> dict.insert(base, bctx.project_name <> "/gprelude", "gprelude")
+    True -> dict.insert(base, "gekko/gprelude", "gprelude")
     False -> base
   }
   let base = case needs_float {

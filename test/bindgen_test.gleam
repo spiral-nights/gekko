@@ -1,4 +1,5 @@
 import filepath
+import gekko
 import gleam/list
 import gleam/option.{Some}
 import gleam/set
@@ -1007,4 +1008,97 @@ pub fn moonbit_syntax_helpers_test() {
   assert syntax.split_top_level_colon("label~ : @pkg.Map[String, Int]")
     == Some(#("label~ ", " @pkg.Map[String, Int]"))
   assert syntax.split_top_level_colon("@pkg.Type::method") == option.None
+}
+
+pub fn moonbit_lsp_workspace_moon_work_test() {
+  let root = "build/test_fixtures/mbt_lsp_work"
+  let out_dir = filepath.join(root, "build/moonbit")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/helper"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"lsp_demo\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/moon.mod"),
+      contents: "name = \"lsp_demo_mbt\"\nversion = \"0.1.0\"\n\nimport {\n  \"gekko/gprelude@0.1.0\",\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/helper/moon.pkg"),
+      contents: "import {\n  \"gekko/gprelude\" @gprelude,\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/helper/helper.mbt"),
+      contents: "///|\npub fn count_items(xs : @gprelude.GList[Int64]) -> Int64 {\n  xs.to_array().length().to_int64()\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/lsp_demo.gleam"),
+      contents: "/// @external(moonbit, \"helper\", \"count_items\")\npub fn count_items(xs: List(Int)) -> Int {\n  let _ = xs\n  0\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  // build/.gekko_gprelude and root moon.work are generated
+  assert simplifile.is_file(filepath.join(
+      root,
+      "build/.gekko_gprelude/moon.mod",
+    ))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(root, "moon.work")) == Ok(True)
+
+  // build/moonbit/moon.mod must NOT contain "gekko/gprelude"
+  let assert Ok(out_mod) = simplifile.read(filepath.join(out_dir, "moon.mod"))
+  assert !string.contains(out_mod, "gekko/gprelude")
+
+  // build/moonbit/helper/moon.pkg rewrites "gekko/gprelude" to "lsp_demo/gprelude"
+  let assert Ok(out_pkg) =
+    simplifile.read(filepath.join(out_dir, "helper/moon.pkg"))
+  assert string.contains(out_pkg, "\"lsp_demo/gprelude\" @gprelude")
+  assert !string.contains(out_pkg, "\"gekko/gprelude\"")
+
+  // moon check --deny-warn passes BOTH in out_dir AND directly at root (via moon.work)
+  let chk_out =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert chk_out.exit_code == 0
+
+  let chk_root =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: root,
+    )
+  assert chk_root.exit_code == 0
+
+  // gekko.clean_project removes build/.gekko_gprelude and generated moon.work
+  let assert Ok(_) = gekko.clean_project(root)
+  assert simplifile.is_directory(filepath.join(root, "build/.gekko_gprelude"))
+    != Ok(True)
+  assert simplifile.is_file(filepath.join(root, "moon.work")) != Ok(True)
+
+  // Hand-written moon.work is preserved by transpile_project and clean_project
+  let custom_work = "members = [\n  \"moonbit\",\n]\n"
+  assert simplifile.write(
+      to: filepath.join(root, "moon.work"),
+      contents: custom_work,
+    )
+    == Ok(Nil)
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  assert simplifile.read(filepath.join(root, "moon.work")) == Ok(custom_work)
+  let assert Ok(_) = gekko.clean_project(root)
+  assert simplifile.read(filepath.join(root, "moon.work")) == Ok(custom_work)
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
 }

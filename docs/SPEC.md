@@ -19,8 +19,8 @@
 
 ```text
 [ Target Gleam Project ]
-  ├── gleam.toml & manifest.toml
-  ├── gekko.toml (optional FFI overrides)
+  ├── gleam.toml & manifest.toml (`[tools.gekko.use_shims]`, etc.)
+  ├── patches/ (optional `#gekko.patch` overlays)
   ├── src/**/*.gleam
   ├── build/packages/<pkg>/src/**/*.gleam
   └── wit/*.wit (optional Wasm Component interfaces)
@@ -37,7 +37,7 @@
       - CustomType definitions, constructor variants, field lists, and shared fields
       - `has_function_field` transitive reachability (controls `#derive(Eq, Debug, Hash)`)
       - Function arities, labeled argument positions, and resolved HM parameter/return types
-      - Module import aliases (`import gleam/list as l`) and FFI overrides (`gekko.toml`)
+      - Module import aliases (`import gleam/list as l`) and companion shim overlays (`patches/`, `[tools.gekko.*]`)
           │
           ▼  (Step 3: AST Desugaring & Lowering Pass)
   • Desugar `use` statements right-to-left into nested trailing closures
@@ -72,6 +72,9 @@ gekko/
 ├── gleam.toml                     # Deps: glance, simplifile, filepath, tom, gleam_json, argv
 ├── README.md
 ├── docs/
+│   ├── GUIDE.md
+│   ├── SHIMS.md
+│   ├── SEMANTICS.md
 │   ├── SPEC.md
 │   └── ROADMAP.md
 ├── src/
@@ -79,7 +82,7 @@ gekko/
 │   ├── gekko_ffi.erl              # Erlang FFI (process runner, env, `:zip` reader, SHA-256)
 │   ├── project/
 │   │   ├── cmd.gleam              # External command runner & Erlang FFI bindings
-│   │   ├── ffi_config.gleam       # Parses gekko.toml / [tools.gekko.overrides] / moonbit/moon.mod
+│   │   ├── ffi_config.gleam       # Parses [tools.gekko.*] / legacy gekko.toml / moonbit/moon.mod
 │   │   ├── interface.gleam        # Decodes package-interface JSON into type lookup tables
 │   │   ├── loader.gleam           # Reads gleam.toml, manifest.toml, build/packages/*
 │   │   ├── moonbit_ffi.gleam      # Discovers & copies local moonbit/ FFI packages
@@ -139,14 +142,14 @@ Gleam downloads all resolved Hex dependencies into `build/packages/<package_name
    - Gleam module `a/b.gleam` (whether root or dependency) maps to `<out_dir>/a_b/` via `pkg_config.resolve_module_pkg_dirs`, keeping FFI `moon.pkg` package references uniform (e.g. `"<project>/gleam_order" @gleam_order`), while disambiguating collisions (e.g. `foo/bar.gleam` vs `foo_bar.gleam` → `foo_bar__2`).
 3. **FFI-Backed `gleam_stdlib` and `gleam_json` Strategy:**
    - Most of `gleam_stdlib` and `gleam_json` is pure Gleam (or includes pure-Gleam fallback bodies below `@external(erlang, ...)`). Only a small set of leaf primitives actually invoke host FFI (`gleam/string`, `gleam/dict`, `gleam/bit_array`, `gleam/int`, `gleam/float`, `gleam/dynamic/decode`, `gleam/io`, and ~12 primitives in `gleam/json`).
-   - Rather than re-implementing every stdlib module from scratch in MoonBit, `gekko` **transpiles the real `.gleam` files** of unmodified upstream [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) from `build/packages/`, applying co-located `[patch]` MoonBit implementations from companion shims [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json) so APIs and edge-case semantics match standard Gleam 100%.
+   - Rather than re-implementing every stdlib module from scratch in MoonBit, `gekko` **transpiles the real `.gleam` files** of unmodified upstream [`gleam_stdlib`](https://hex.pm/packages/gleam_stdlib) and [`gleam_json`](https://hex.pm/packages/gleam_json) from `build/packages/`, applying co-located `patches/` (`#gekko.patch`) MoonBit implementations from companion shims [`gekko_stdlib`](https://github.com/spiral-nights/gekko_stdlib) and [`gekko_json`](https://github.com/spiral-nights/gekko_json) (authorized via `[tools.gekko.use_shims]`) so APIs and edge-case semantics match standard Gleam 100%.
    - Bundled `moonbit/` FFI packages inside those repositories implement only the leaf `@external(moonbit, ...)` primitives using MoonBit `core` types (`Map`, `@json.Json`, `Bytes`, `String`, `Int64`, `Double`, and `@gprelude.Dynamic`).
    - **Pure-Gleam Fallback Rule:** If a function in a dependency declares `@external(erlang, ...)` / `@external(javascript, ...)` and also provides a pure-Gleam body, emit the pure-Gleam body unless overridden in the FFI shim registry or `gekko.toml` / `[tools.gekko.overrides]` (allowing selective MoonBit fast-path overrides for hot functions like `list.reverse` or `string.join`).
    - **Hard External Error Reporting:** If a reachable function has Erlang/JS externals, no pure-Gleam fallback body, and no entry in the FFI registry or overrides, fail fast at compile time with the exact `package:module.function` path and `file:line:col` location.
 
 ---
 
-### 4.2 FFI into MoonBit Functions (`@external(moonbit, ...)` & `gekko.toml`)
+### 4.2 FFI into MoonBit Functions (`@external(moonbit, ...)` & Companion Shims)
 
 Standard `gleam check` and `glance` restrict `@external(...)` targets to `erlang` and `javascript`. `gekko` supports three complementary mechanisms:
 
@@ -165,17 +168,16 @@ Standard `gleam check` and `glance` restrict `@external(...)` targets to `erlang
    - Replaces the attribute line with `// @external_moonbit_stripped` (preserving exact line numbers for diagnostics).
    - Injects a dummy `{ panic }` body in the in-memory copy if the Gleam function is bodyless so `glance` and staging parse cleanly.
 
-3. **Sidecar `gekko.toml`, `[tools.gekko.*]`, and Companion Shim Packages:**
-   Allows both root projects and standalone companion shim dependencies to bind unmodified third-party Hex dependency types and functions to MoonBit implementations without modifying `build/packages/` (see [`docs/SHIMS.md`](./SHIMS.md) for the full schema):
-   - `[shim]` (`target`, SemVer `version` constraint check)
-   - `[patch."pkg:mod"]` (`file`/`files`, `imports`, `types`, `functions` co-located directly inside the transpiled module's MoonBit package to avoid circular imports)
-   - `[type_overrides."pkg:mod.Type"]` (`package`, `type`)
-   - `[overrides."pkg:mod.fn"]` (`package` + `function`, `wasm_module` + `import_name`)
-   - `[target_branch."pkg:mod"]` (`prefer = "erlang" | "javascript"`)
+3. **Companion Shim Packages (`[tools.gekko.*]` & `patches/` + `#gekko.patch`):**
+   Allows both root projects and standalone companion shim dependencies to bind unmodified third-party Hex dependency types and functions to MoonBit implementations without modifying `build/packages/` (see [`docs/SHIMS.md`](./SHIMS.md) for the full schema, including legacy `gekko.toml` support):
+   - `[tools.gekko.use_shims]` (root `gleam.toml` allowlist enabling `<pkg> = "<shim_pkg>"`)
+   - `[tools.gekko.shim_for]` (`package`, SemVer `version` constraint check)
+   - `patches/<mod>/` (`moon.pkg` + `#gekko.patch`-annotated `.mbt` files co-located directly inside the transpiled module's MoonBit package to avoid circular imports)
+   - `[tools.gekko.target_branch."pkg:mod"]` (`prefer = "erlang" | "javascript"`)
 
 **FFI Emission Modes:**
 - **Package Call Mode (`"pkg/path"`, `"fn_name"`):** Adds `"pkg/path"` to the package's `moon.pkg` `import { ... }` block and emits a wrapper function calling `@alias.fn_name(args...)`.
-- **Co-Located Patch Mode (`[patch]`):** Places the `.mbt` patch directly in the module's MoonBit package and emits a private `__gekko_sigcheck_<fn>` compile-time signature check.
+- **Co-Located Patch Mode (`patches/` + `#gekko.patch`):** Places the `.mbt` patch directly in the module's MoonBit package and emits a private `__gekko_sigcheck_<fn>` compile-time signature check.
 - **Raw Wasm Import Mode (`"wasm:module_name"`, `"import_name"`):** Emits a MoonBit Wasm import declaration:
   ```moonbit
   ///|

@@ -224,7 +224,7 @@ fn visit_package_dir(
         list.try_each(files, fn(file) {
           let src_file = filepath.join(cur_dir, file)
           let dst_file = filepath.join(dest_dir, file)
-          case file == "moon.pkg" && source_pkg_name != project_name {
+          case file == "moon.pkg" {
             True ->
               rewrite_and_copy_moon_pkg(
                 src_file,
@@ -285,12 +285,21 @@ fn rewrite_and_copy_moon_pkg(
       <> simplifile.describe_error(err)
     }),
   )
-  let updated =
+  let with_prelude =
     string.replace(
       content,
-      "\"" <> source_pkg_name <> "/",
-      "\"" <> project_name <> "/",
+      "\"gekko/gprelude\"",
+      "\"" <> project_name <> "/gprelude\"",
     )
+  let updated = case source_pkg_name == project_name {
+    True -> with_prelude
+    False ->
+      string.replace(
+        with_prelude,
+        "\"" <> source_pkg_name <> "/",
+        "\"" <> project_name <> "/",
+      )
+  }
   write_text_if_changed(dst, updated, "Failed to write local moon.pkg " <> dst)
 }
 

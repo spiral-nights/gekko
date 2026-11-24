@@ -1,5 +1,8 @@
 # Companion Shim & Overlay Packages (`gekko`)
 
+> [!TIP]
+> New to `gekko` or writing your first shim? Start with the step-by-step walkthrough in **[`docs/GUIDE.md`](./GUIDE.md)**. This document is the full companion-shim reference.
+
 `gekko` lets you compile **unmodified upstream Hex packages** to MoonBit and WebAssembly by pairing them with a **companion shim (overlay) package**—without maintaining a source fork or fragile line-based diffs.
 
 ---
@@ -14,7 +17,7 @@ In MoonBit, every directory is a package, and MoonBit forbids circular package i
 
 ```text
 gekko_json/                # companion shim package
-├── gleam.toml             # [tools.gekko.shim] metadata + normal Gleam deps
+├── gleam.toml             # [tools.gekko.shim_for] metadata + normal Gleam deps
 ├── src/
 │   └── gekko_json.gleam
 └── patches/               # co-located .mbt files mirroring upstream modules
@@ -26,19 +29,19 @@ gekko_json/                # companion shim package
 
 Because Gleam already forbids circular imports between `.gleam` modules, co-located module patches keep MoonBit's package graph **100% acyclic**—with zero `__shim_` prefixes, zero extra packages, and direct access to same-module error enums and private helpers.
 
-In your application's `gleam.toml`, depend on **both** the unmodified upstream library and its companion shim, and explicitly authorize the shim in `[tools.gekko.shims]`:
+In your application's `gleam.toml`, depend on **both** the unmodified upstream library and its companion shim, and explicitly enable the shim in `[tools.gekko.use_shims]`:
 
 ```toml
 [dependencies]
 gleam_json = ">= 3.0.0 and < 4.0.0"
 gekko_json = { git = "https://github.com/...", ref = "main" }
 
-[tools.gekko.shims]
+[tools.gekko.use_shims]
 gleam_json = "gekko_json"
 ```
 
 - `gleam check` and `gleam test` (BEAM/JS) ignore `[tools.gekko.*]` and `patches/`, so standard Gleam tooling continues working untouched.
-- **Root-only authorization:** Dependencies can never silently patch another package. Only shims explicitly listed under `[tools.gekko.shims]` in your **root** `gleam.toml` are permitted to apply patches.
+- **Root-only authorization:** Dependencies can never silently patch another package. Only shims explicitly listed under `[tools.gekko.use_shims]` in your **root** `gleam.toml` are permitted to apply patches.
 
 ---
 
@@ -46,12 +49,12 @@ gleam_json = "gekko_json"
 
 Package-level shim metadata lives under **`[tools.gekko.*]` in `gleam.toml`**.
 
-### 1. `[tools.gekko.shims]` *(Root `gleam.toml`)* & `[tools.gekko.shim]` *(Shim `gleam.toml`)*
+### 1. `[tools.gekko.use_shims]` *(Root `gleam.toml`)* & `[tools.gekko.shim_for]` *(Shim `gleam.toml`)*
 
-Your **root** `gleam.toml` authorizes which shim package may patch each target dependency:
+Your **root** `gleam.toml` enables and authorizes which shim package may patch each target dependency:
 
 ```toml
-[tools.gekko.shims]
+[tools.gekko.use_shims]
 gleam_stdlib = "gekko_stdlib"
 gleam_json = "gekko_json"
 ```
@@ -59,17 +62,17 @@ gleam_json = "gekko_json"
 And the **shim** package's `gleam.toml` declares which upstream package it targets and the SemVer range it was written against:
 
 ```toml
-[tools.gekko.shim]
-target = "gleam_json"
+[tools.gekko.shim_for]
+package = "gleam_json"
 version = ">= 3.0.0 and < 4.0.0"
 ```
 
-Supported SemVer constraint operators: `>=`, `<=`, `>`, `<`, `==`, `!=`, `~>`, `^`, and compound clauses joined by `and` (or `&&` / `,`). If the resolved version of `target` in `manifest.toml` does not satisfy `version` (or `target` is not a dependency), `gekko` emits a clear warning.
+Supported SemVer constraint operators: `>=`, `<=`, `>`, `<`, `==`, `!=`, `~>`, `^`, and compound clauses joined by `and` (or `&&` / `,`). If the resolved version of `package` in `manifest.toml` does not satisfy `version` (or `package` is not a dependency), `gekko` emits a clear warning.
 
 **Security Confinement:**
-1. Any dependency package that ships `patches/` or `[tools.gekko.*]` overrides **must** declare `[tools.gekko.shim] target = "<pkg>"` in its `gleam.toml`.
-2. That dependency is **only** permitted if the root `gleam.toml` explicitly authorizes `<pkg> = "<shim_pkg>"` in `[tools.gekko.shims]`, and every patched/overridden symbol must belong to `<pkg>`.
-3. If an unexpected or transitive dependency attempts to patch any package without root authorization, compilation fails immediately with a security error. (Root projects may override any dependency without `[tools.gekko.shims]`.)
+1. Any dependency package that ships `patches/` or `[tools.gekko.*]` overrides **must** declare `[tools.gekko.shim_for] package = "<pkg>"` in its `gleam.toml`.
+2. That dependency is **only** permitted if the root `gleam.toml` explicitly enables `<pkg> = "<shim_pkg>"` in `[tools.gekko.use_shims]`, and every patched/overridden symbol must belong to `<pkg>`.
+3. If an unexpected or transitive dependency attempts to patch any package without root authorization, compilation fails immediately with a security error. (Root projects may override any dependency without `[tools.gekko.use_shims]`.)
 
 ---
 
@@ -114,7 +117,7 @@ pub fn to_string_tree(json : Json) -> @string_tree.StringTree {
 fn json_to_dynamic(j : @json.Json) -> @gprelude.Dynamic { ... }
 ```
 
-- **`#gekko.patch`:** Maps the MoonBit declaration to the same-named Gleam type, type alias, or function in the module. Annotating a MoonBit type alias (`pub type Dynamic = @gprelude.Dynamic` or `pub type Option[T] = @prelude.Option[T]`) automatically maps the upstream Gleam type to that MoonBit target without TOML configuration.
+- **`#gekko.patch`:** Maps the MoonBit declaration to the same-named Gleam type, type alias, or function in the module. Annotating a MoonBit type alias (`pub type Dynamic = @gprelude.Dynamic` or `pub using @prelude { type Option }` for reserved built-ins) automatically maps the upstream Gleam type to that MoonBit target without TOML configuration.
 - **`#gekko.patch("gleam_name")`:** Maps to a different Gleam identifier (e.g. `#gekko.patch("println")` on `pub fn println_` when a Gleam name is a MoonBit keyword), or to an explicit `"mod.sym"` / `"pkg:mod.sym"` target.
 - **`imports` (`moon.pkg`):** `@gprelude` is imported automatically. Any package already imported by the upstream Gleam module is deduplicated automatically.
 - **Signature checks:** `gekko` emits zero-cost compile-time signature checks (`__gekko_sigcheck_<fn>`) so upstream type changes are caught immediately by `moon check`. Functions marked `pub` in Gleam must be `pub` in the `.mbt` patch file.
@@ -161,7 +164,7 @@ Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[tools
 ## Precedence & Conflict Resolution
 
 1. **Upstream source pragmas** (`/// @external(moonbit, ...)` / `/// @external_type(moonbit, ...)`) — lowest precedence.
-2. **Dependency shims** (`[tools.gekko.*]` in `gleam.toml` and `#gekko.patch` in `patches/`) — strictly confined to the declared `[tools.gekko.shim] target`; if two dependency shims define *different* overrides for the same key, `gekko` fails with an error naming both shims.
+2. **Dependency shims** (`[tools.gekko.*]` in `gleam.toml` and `#gekko.patch` in `patches/`) — strictly confined to the declared `[tools.gekko.shim_for] package`; if two dependency shims define *different* overrides for the same key, `gekko` fails with an error naming both shims.
 3. **Root project `gleam.toml`** (`[tools.gekko.*]`) / `patches/` — overrides dependency shims (and resolves conflicts between two dependency shims).
 
 ---
@@ -179,7 +182,7 @@ gekko shim init simplifile
 gekko shim init simplifile --out ../gekko_simplifile
 ```
 
-`gekko shim init` generates `gleam.toml` (with `[tools.gekko.shim]`) and `patches/<mod>/` (`moon.pkg` + `#gekko.patch`-annotated `.mbt` stubs matching upstream's exact lowered MoonBit signatures).
+`gekko shim init` generates `gleam.toml` (with `[tools.gekko.shim_for]`) and `patches/<mod>/` (`moon.pkg` + `#gekko.patch`-annotated `.mbt` stubs matching upstream's exact lowered MoonBit signatures).
 
 ---
 

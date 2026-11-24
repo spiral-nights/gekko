@@ -197,7 +197,7 @@ pub fn init_shim(
     <> target_pkg
     <> "':\n"
     <> created
-    <> "\n\nConsumers should authorize this shim in their root gleam.toml:\n\n  [tools.gekko.shims]\n  "
+    <> "\n\nConsumers should enable this shim in their root gleam.toml:\n\n  [tools.gekko.use_shims]\n  "
     <> target_pkg
     <> " = \""
     <> shim_name
@@ -488,7 +488,7 @@ fn collect_patched_modules(data: InspectData) -> List(String) {
 
 fn render_shim_gleam_toml_section(data: InspectData) -> String {
   let ver_constraint = suggest_semver_constraint(data.version)
-  "[tools.gekko.shim]\ntarget = \""
+  "[tools.gekko.shim_for]\npackage = \""
   <> data.pkg_name
   <> "\"\nversion = \""
   <> ver_constraint

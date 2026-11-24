@@ -962,10 +962,7 @@ pub fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
     IrTypeNamed(module_alias:, package: _, module:, name:, args:) ->
       case module, name {
         "gleam", "Dynamic" -> #("@gprelude.Dynamic", add_gprelude_import(ctx))
-        "gleam", "UtfCodepoint" -> #(
-          "@gprelude.UtfCodepoint",
-          add_gprelude_import(ctx),
-        )
+        "gleam", "UtfCodepoint" -> #("Char", ctx)
         _, _ ->
           case lookup_external_type(module, name, ctx) {
             Some(ExternalType(package: pkg, type_name: target))

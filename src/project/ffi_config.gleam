@@ -7,6 +7,7 @@ import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import project/patch_discovery
 import project/prepass.{
   type ExternalType, type FfiKind, type TargetBranch, ExternalType, PackageCall,
   Patched, PreferErlang, PreferJavascript, WasmImport,
@@ -1270,11 +1271,25 @@ pub fn load_package_overlay(
   let explicit_type_overrides = dict.merge(ty_g, ty_k)
   let target_branches = dict.merge(br_g, br_k)
   let raw_patches = merge_module_patch_dicts(pat_g, pat_k)
-  use resolved_patches <- result.try(resolve_module_patch_files(
+  use resolved_toml_patches <- result.try(resolve_module_patch_files(
     pkg_root,
     pkg_name,
     raw_patches,
   ))
+  let toml_patched_paths =
+    dict.fold(resolved_toml_patches, set.new(), fn(acc, _k, patch) {
+      list.fold(patch.files, acc, fn(s, f) { set.insert(s, f.source_path) })
+    })
+  let target_pkg = option.map(shim, fn(s) { s.target })
+  use discovered_raw <- result.try(patch_discovery.discover_directory_patches(
+    pkg_root,
+    pkg_name,
+    target_pkg,
+    toml_patched_paths,
+  ))
+  let discovered_patches = convert_discovered_patches(discovered_raw)
+  let resolved_patches =
+    merge_module_patch_dicts(resolved_toml_patches, discovered_patches)
 
   let #(patch_fn_overrides, patch_type_overrides) =
     expand_patch_entries(resolved_patches)
@@ -1289,6 +1304,26 @@ pub fn load_package_overlay(
     module_patches: resolved_patches,
     target_branches:,
   ))
+}
+
+fn convert_discovered_patches(
+  discovered: Dict(String, patch_discovery.DiscoveredModulePatch),
+) -> Dict(String, ModulePatch) {
+  dict.map_values(discovered, fn(_k, p) {
+    let files =
+      list.map(p.files, fn(f) {
+        ModulePatchFile(
+          source_path: f.source_path,
+          dest_filename: f.dest_filename,
+          source_pkg: f.source_pkg,
+        )
+      })
+    let imports =
+      list.map(p.imports, fn(i) {
+        ModulePatchImport(package: i.package, alias: i.alias)
+      })
+    ModulePatch(files:, imports:, types: p.types, functions: p.functions)
+  })
 }
 
 fn expand_patch_entries(
@@ -1407,6 +1442,8 @@ pub fn merge_overlays(
   dep_overlays: List(PackageOverlay),
   root_overlay: PackageOverlay,
 ) -> Result(MergedOverlays, String) {
+  use _ <- result.try(list.try_each(dep_overlays, validate_dep_overlay_scope))
+
   let shims =
     list.filter_map(dep_overlays, fn(ov) {
       case ov.shim {
@@ -1514,7 +1551,7 @@ fn merge_keyed_with_root(
         <> pkg_a
         <> "' and '"
         <> pkg_b
-        <> "' (override it in root gleam.toml/gekko.toml to resolve)",
+        <> "' (override it in root gleam.toml [tools.gekko.*] to resolve)",
       )
     [] -> {
       let final_map = dict.merge(dep_map, root_map)
@@ -1523,6 +1560,50 @@ fn merge_keyed_with_root(
           dict.insert(s, k, root_overlay.source_pkg)
         })
       Ok(#(final_map, final_src))
+    }
+  }
+}
+
+fn validate_dep_overlay_scope(dep: PackageOverlay) -> Result(Nil, String) {
+  let has_any =
+    !dict.is_empty(dep.overrides)
+    || !dict.is_empty(dep.type_overrides)
+    || !dict.is_empty(dep.module_patches)
+    || !dict.is_empty(dep.target_branches)
+  case has_any, dep.shim {
+    False, _ -> Ok(Nil)
+    True, None ->
+      Error(
+        "Security error: dependency '"
+        <> dep.source_pkg
+        <> "' defines gekko patches or overrides without declaring [tools.gekko.shim] target = \"<pkg>\" in gleam.toml",
+      )
+    True, Some(ShimMeta(target:, ..)) -> {
+      let check_keys = fn(keys: List(String), allow_exact: Bool) {
+        list.try_each(keys, fn(k) {
+          let allowed =
+            string.starts_with(k, target <> ":")
+            || string.starts_with(k, target <> ".")
+            || { allow_exact && k == target }
+          case allowed {
+            True -> Ok(Nil)
+            False ->
+              Error(
+                "Security error: shim dependency '"
+                <> dep.source_pkg
+                <> "' declares target '"
+                <> target
+                <> "' and cannot patch/override '"
+                <> k
+                <> "'",
+              )
+          }
+        })
+      }
+      use _ <- result.try(check_keys(dict.keys(dep.overrides), False))
+      use _ <- result.try(check_keys(dict.keys(dep.type_overrides), False))
+      use _ <- result.try(check_keys(dict.keys(dep.module_patches), False))
+      check_keys(dict.keys(dep.target_branches), True)
     }
   }
 }

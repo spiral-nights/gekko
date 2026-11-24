@@ -112,7 +112,7 @@ pub fn bits_to_string(bits : @gprelude.BitArray) -> Result[String, Unit] {
   while offset < bits.bit_length {
     match @gprelude.bit_array_read_utf8_codepoint(bits, offset) {
       Some((cp, next)) => {
-        buf.write_char(cp.code.to_int().unsafe_to_char())
+        buf.write_char(cp)
         offset = next
       }
       None => return Err(())

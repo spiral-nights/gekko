@@ -4,7 +4,7 @@
 
 ---
 
-## Why Co-Located Module Patches (`[patch]`)?
+## Why Co-Located Module Patches (`patches/` + `#gekko.patch`)?
 
 Most Gleam libraries are 90–99% pure Gleam with a small pocket of `@external(erlang, ...)` / `@external(javascript, ...)` functions and opaque external types.
 
@@ -14,13 +14,14 @@ In MoonBit, every directory is a package, and MoonBit forbids circular package i
 
 ```text
 gekko_json/                # companion shim package
-├── gleam.toml             # normal Gleam package metadata
-├── gekko.toml             # [shim] + [patch."pkg:mod"]
+├── gleam.toml             # [tools.gekko.shim] metadata + normal Gleam deps
 ├── src/
 │   └── gekko_json.gleam
 └── patches/               # co-located .mbt files mirroring upstream modules
     └── gleam/
-        └── json.mbt
+        └── json/
+            ├── moon.pkg   # standard MoonBit imports for this patch
+            └── json.mbt   # #gekko.patch-annotated MoonBit implementations
 ```
 
 Because Gleam already forbids circular imports between `.gleam` modules, co-located module patches keep MoonBit's package graph **100% acyclic**—with zero `__shim_` prefixes, zero extra packages, and direct access to same-module error enums and private helpers.
@@ -33,95 +34,96 @@ gleam_json = ">= 3.0.0 and < 4.0.0"
 gekko_json = { git = "https://github.com/...", ref = "main" }
 ```
 
-- `gleam check` and `gleam test` (BEAM/JS) ignore `gekko.toml` and `patches/`, so standard Gleam tooling continues working untouched.
-- `gekko` automatically discovers `gekko.toml` and `[tools.gekko.*]` overlays across all resolved dependencies and applies them during transpilation.
+- `gleam check` and `gleam test` (BEAM/JS) ignore `[tools.gekko.*]` and `patches/`, so standard Gleam tooling continues working untouched.
+- `gekko` automatically discovers `[tools.gekko.*]` overlays and `patches/` across all resolved dependencies and applies them during transpilation.
 
 ---
 
 ## Configuration Reference
 
-Every overlay key can be placed in **`gekko.toml`** (recommended for shims) or under **`[tools.gekko.*]` in `gleam.toml`**.
+Package-level shim metadata and one-line aliases live under **`[tools.gekko.*]` in `gleam.toml`**.
 
-### 1. `[shim]` — Target Package & SemVer Guard
+### 1. `[tools.gekko.shim]` — Target Package & SemVer Guard *(Required for Dependency Shims)*
 
 Declares which upstream package the shim targets and the SemVer range it was written against:
 
 ```toml
-[shim]
+[tools.gekko.shim]
 target = "gleam_json"
 version = ">= 3.0.0 and < 4.0.0"
 ```
 
 Supported SemVer constraint operators: `>=`, `<=`, `>`, `<`, `==`, `!=`, `~>`, `^`, and compound clauses joined by `and` (or `&&` / `,`). If the resolved version of `target` in `manifest.toml` does not satisfy `version` (or `target` is not a dependency), `gekko` emits a clear warning.
 
+**Security Confinement:** Any dependency package that ships `patches/` or `[tools.gekko.*]` overrides **must** declare `[tools.gekko.shim] target = "<pkg>"` in its `gleam.toml`, and is strictly confined to patching/overriding symbols belonging to `<pkg>`. Attempting to patch another package (or omitting `[tools.gekko.shim]`) fails compilation with a security error. (Root projects may override any dependency without `[tools.gekko.shim]`.)
+
 ---
 
-### 2. `[patch."pkg:mod"]` — Co-Located Module Patches *(Primary Mechanism)*
+### 2. `patches/` + `#gekko.patch` — Co-Located Module Patches *(Primary Mechanism)*
 
-Copies one or more `.mbt` files directly into the transpiled module's MoonBit package directory (`build/moonbit/<mod>/`), skips emitting the listed `types` and `functions` in the generated `.mbt`, and emits zero-cost compile-time signature checks (`__gekko_sigcheck_<fn>`) so upstream type changes are caught immediately by `moon check`:
+`gekko` automatically discovers `.mbt` files under `<pkg_root>/patches/` in two layouts:
 
-```toml
-[patch."gleam_json:gleam/json"]
-file = "patches/gleam/json.mbt"
-imports = ["moonbitlang/core/json"]
-types = ["Json"]
-functions = [
-  "decode_string",
-  "to_string_tree",
-  "do_to_string",
-  "do_string",
-  "do_bool",
-  "do_int",
-  "do_float",
-  "do_null",
-  "do_object",
-  "do_preprocessed_array",
-]
-```
+- **Package-directory layout (`patches/<mod>/moon.pkg` + `*.mbt`):** Used whenever a patch needs extra MoonBit imports. All direct `.mbt` files in that directory are copied into the transpiled module's package (`build/moonbit/<mod>/`), and `moon.pkg`'s `import { ... }` entries are merged automatically.
+- **Single-file layout (`patches/<mod>.mbt`):** Used when no extra imports beyond `@gprelude` and same-module types are needed.
 
-And `patches/gleam/json.mbt` defines `Json` and each listed function directly with its real name:
+Inside a patch `.mbt` file, annotate every patched type or function with `#gekko.patch`:
 
 ```moonbit
+// patches/gleam/json/moon.pkg
+import {
+  "moonbitlang/core/json",
+  "moonbitlang/core/string" @str,
+}
+```
+
+```moonbit
+// patches/gleam/json/json.mbt
 ///|
+#gekko.patch
 pub(all) struct Json {
   raw : @json.Json
 }
 
 ///|
+#gekko.patch
 fn decode_string(a : String) -> Result[@gprelude.Dynamic, DecodeError] {
   ... // constructs UnexpectedEndOfInput / UnexpectedByte directly
 }
 
 ///|
+#gekko.patch
 pub fn to_string_tree(json : Json) -> @string_tree.StringTree {
   @string_tree.from_string(do_to_string(json))
 }
+
+// No #gekko.patch -> private helper, never treated as an upstream override
+fn json_to_dynamic(j : @json.Json) -> @gprelude.Dynamic { ... }
 ```
 
-- **`file` / `files`:** Path (or array of paths) relative to the shim package root. (`file` and `files` are mutually exclusive.)
-- **`imports`:** Optional list of extra MoonBit packages or Gleam modules needed by the patch file (e.g. `"moonbitlang/core/json"` or `"gleam/dict"`). `gprelude` is imported automatically as `@gprelude`, and any package already imported by the upstream Gleam module is deduplicated automatically (use `"pkg as alias"` or `"pkg @alias"` if an alias conflicts).
-- **`types`:** List of upstream zero-variant external types defined directly inside the patch file.
-- **`functions`:** List of upstream functions implemented directly inside the patch file. Functions marked `pub` in Gleam must be `pub` in the `.mbt` patch file.
+- **`#gekko.patch`:** Maps the MoonBit declaration to the same-named Gleam type or function in the module.
+- **`#gekko.patch("gleam_name")`:** Maps to a different Gleam identifier (e.g. `#gekko.patch("println")` on `pub fn println_` when a Gleam name is a MoonBit keyword), or to an explicit `"mod.sym"` / `"pkg:mod.sym"` target.
+- **`imports` (`moon.pkg`):** `@gprelude` is imported automatically. Any package already imported by the upstream Gleam module is deduplicated automatically.
+- **Signature checks:** `gekko` emits zero-cost compile-time signature checks (`__gekko_sigcheck_<fn>`) so upstream type changes are caught immediately by `moon check`. Functions marked `pub` in Gleam must be `pub` in the `.mbt` patch file.
 
 ---
 
-### 3. `[type_overrides."..."]` & `[overrides."..."]` — Direct Aliases
+### 3. `[tools.gekko.type_overrides."..."]` & `[tools.gekko.overrides."..."]` — Direct Aliases
 
 For one-line mappings that don't need a `.mbt` patch file (such as mapping `gleam/option.Option` to MoonBit's built-in `Option`, `gleam/dynamic.Dynamic` to `@gprelude.Dynamic`, or calling a third-party MoonBit package or raw Wasm import directly):
 
 ```toml
 # Map an opaque type to a MoonBit builtin or external package type
-[type_overrides."gleam_stdlib:gleam/option.Option"]
+[tools.gekko.type_overrides."gleam_stdlib:gleam/option.Option"]
 package = "builtin"
 type = "Option"
 
 # Map a function to a MoonBit package function
-[overrides."simplifile:simplifile.read_bits"]
+[tools.gekko.overrides."simplifile:simplifile.read_bits"]
 package = "simplifile_ffi"
 function = "read_bits"
 
 # Map a function to a raw Wasm host import
-[overrides."my_pkg:my_pkg/host.log_int"]
+[tools.gekko.overrides."my_pkg:my_pkg/host.log_int"]
 wasm_module = "host"
 import_name = "log_int"
 ```
@@ -130,29 +132,48 @@ Key lookup order: `"<pkg>:<mod>.<sym>"` (recommended), `"<pkg>.<mod>.<sym>"`, th
 
 ---
 
-### 4. `[target_branch."..."]` — Selecting `@target(javascript)` vs `@target(erlang)`
+### 4. `[tools.gekko.target_branch."..."]` — Selecting `@target(javascript)` vs `@target(erlang)`
 
 By default, `gekko` keeps `@target(erlang)` definitions and drops `@target(javascript)` definitions. When an upstream module has a pure-Gleam (or simpler) `@target(javascript)` branch, switch it per module or package:
 
 ```toml
-[target_branch."some_pkg:some/module"]
+[tools.gekko.target_branch."some_pkg:some/module"]
 prefer = "javascript"   # "erlang" (default) | "javascript"
 ```
 
 ---
 
-### 5. `[moonbit.deps]` & `moonbit/<pkg>/` Packages
+### 5. `[tools.gekko.moonbit.deps]` & `moonbit/<pkg>/` Packages
 
-Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[moonbit.deps]` in `gekko.toml`. If a shim also ships standalone `moonbit/<pkg>/` helper packages, `gekko` automatically rewrites `"<shim_pkg>/..."` imports in `moon.pkg` to `"<root_project>/..."`.
+Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[tools.gekko.moonbit.deps]` in `gleam.toml`. If a shim also ships standalone `moonbit/<pkg>/` helper packages, `gekko` automatically rewrites `"<shim_pkg>/..."` imports in `moon.pkg` to `"<root_project>/..."`.
+
+---
+
+## Gleam ↔ MoonBit FFI & `@gprelude` Type Reference
+
+| Gleam Type | MoonBit Type | Notes / Common Helpers |
+| --- | --- | --- |
+| `Int` | `Int64` | Signed 64-bit integer (`0L` literals) |
+| `Float` | `Double` | IEEE-754 64-bit float |
+| `Bool` | `Bool` | `true` / `false` |
+| `String` | `String` | UTF-16 MoonBit `String` |
+| `Nil` | `Unit` | `()` |
+| `UtfCodepoint` | `Char` | Built-in MoonBit Unicode scalar (`ch.to_int()`, `n.unsafe_to_char()`) |
+| `List(a)` | `@gprelude.GList[A]` | `Nil` \| `Cons(A, GList[A])`, `GList::from_array`, `GList::to_array` |
+| `BitArray` | `@gprelude.BitArray` | `{ data: Bytes, bit_length: Int64 }`, `BitArray::empty`, `from_bytes`, `from_string`, `concat` |
+| `Result(a, b)` | `Result[A, B]` | `Ok(a)` \| `Err(b)` |
+| `Option(a)` | `Option[A]` | `Some(a)` \| `None` (via `gleam_stdlib` type override) |
+| `Dynamic` | `@gprelude.Dynamic` | `DynNull`, `DynBool`, `DynInt`, `DynFloat`, `DynString`, `DynBitArray`, `DynList`, `DynArray`, `DynMap` |
+| `#()`, `#(a)` | `@gprelude.Tuple0`, `@gprelude.Tuple1[A]` | Boxed 0-tuple and 1-tuple wrappers |
+| `#(a, b, ...)` | `(A, B, ...)` | Native MoonBit tuples (2+ elements) |
 
 ---
 
 ## Precedence & Conflict Resolution
 
 1. **Upstream source pragmas** (`/// @external(moonbit, ...)` / `/// @external_type(moonbit, ...)`) — lowest precedence.
-2. **Dependency shims** (`gekko.toml` and `[tools.gekko.*]` in dependencies) — if two dependency shims define *different* overrides for the same key, `gekko` fails with an error naming both shims.
-3. **Root project `gleam.toml`** (`[tools.gekko.*]`) — overrides dependency shims (and resolves conflicts between two dependency shims).
-4. **Root project `gekko.toml`** — highest precedence.
+2. **Dependency shims** (`[tools.gekko.*]` in `gleam.toml` and `#gekko.patch` in `patches/`) — strictly confined to the declared `[tools.gekko.shim] target`; if two dependency shims define *different* overrides for the same key, `gekko` fails with an error naming both shims.
+3. **Root project `gleam.toml`** (`[tools.gekko.*]`) / `patches/` — overrides dependency shims (and resolves conflicts between two dependency shims).
 
 ---
 
@@ -169,7 +190,7 @@ gekko shim init simplifile
 gekko shim init simplifile --out ../gekko_simplifile
 ```
 
-`gekko shim init` generates `gleam.toml`, `gekko.toml` (with `[shim]` and `[patch."<pkg>:<mod>"]`), and `patches/<mod>.mbt` containing typed `abort("todo")` stubs matching upstream's exact lowered MoonBit signatures.
+`gekko shim init` generates `gleam.toml` (with `[tools.gekko.shim]`) and `patches/<mod>/` (`moon.pkg` + `#gekko.patch`-annotated `.mbt` stubs matching upstream's exact lowered MoonBit signatures).
 
 ---
 

@@ -1,4 +1,9 @@
+// =============================================================================
+// Section 1: Public Gleam FFI Types & Traits
+// =============================================================================
+
 ///|
+/// Immutable singly-linked list backing Gleam's `List(a)`.
 #derive(Eq, Debug, Hash)
 pub(all) enum GList[T] {
   Nil
@@ -6,6 +11,7 @@ pub(all) enum GList[T] {
 }
 
 ///|
+/// Convert a Gleam `GList[T]` into a MoonBit `Array[T]`.
 pub fn[T] GList::to_array(self : GList[T]) -> Array[T] {
   let out : Array[T] = []
   for cur = self {
@@ -20,6 +26,7 @@ pub fn[T] GList::to_array(self : GList[T]) -> Array[T] {
 }
 
 ///|
+/// Construct a Gleam `GList[T]` from a MoonBit `ArrayView[T]`.
 pub fn[T] GList::from_array(arr : ArrayView[T]) -> GList[T] {
   let mut acc : GList[T] = Nil
   let mut i = arr.length() - 1
@@ -31,17 +38,7 @@ pub fn[T] GList::from_array(arr : ArrayView[T]) -> GList[T] {
 }
 
 ///|
-pub fn[T] GList::length(self : GList[T]) -> Int64 {
-  for cur = self, count = 0L {
-    match cur {
-      Nil => break count
-      Cons(_, tail) => continue tail, count + 1L
-    }
-  }
-}
-
-///|
-pub fn[T] GList::reverse(self : GList[T]) -> GList[T] {
+fn[T] GList::reverse(self : GList[T]) -> GList[T] {
   for cur = self, acc = Nil {
     match cur {
       Nil => break acc
@@ -51,25 +48,7 @@ pub fn[T] GList::reverse(self : GList[T]) -> GList[T] {
 }
 
 ///|
-#derive(Eq, Debug, Hash)
-pub(all) enum Order {
-  Lt
-  Eq
-  Gt
-}
-
-///|
-#derive(Eq, Debug, Hash)
-pub(all) struct UtfCodepoint {
-  code : Int64
-}
-
-///|
-pub impl GleamInspect for UtfCodepoint with gleam_inspect(self) {
-  "UtfCodepoint(" + self.code.to_string() + ")"
-}
-
-///|
+/// Bit-accurate binary backing Gleam's `BitArray`.
 #derive(Eq, Debug, Hash)
 pub(all) struct BitArray {
   data : Bytes
@@ -77,21 +56,25 @@ pub(all) struct BitArray {
 }
 
 ///|
+/// Return an empty `BitArray`.
 pub fn BitArray::empty() -> BitArray {
   { data: b"", bit_length: 0L }
 }
 
 ///|
+/// Wrap a MoonBit `Bytes` buffer as a byte-aligned `BitArray`.
 pub fn BitArray::from_bytes(b : Bytes) -> BitArray {
   { data: b, bit_length: b.length().to_int64() * 8L }
 }
 
 ///|
+/// Encode a `String` as UTF-8 bytes into a `BitArray`.
 pub fn BitArray::from_string(s : String) -> BitArray {
   BitArray::from_bytes(@utf8.encode(s))
 }
 
 ///|
+/// Return the total number of bits in `self`.
 pub fn BitArray::bit_size(self : BitArray) -> Int64 {
   self.bit_length
 }
@@ -102,16 +85,19 @@ pub fn bit_array_bit_size(ba : BitArray) -> Int64 {
 }
 
 ///|
+/// Return the number of bytes in `self` (rounded up to full bytes in `data`).
 pub fn BitArray::byte_size(self : BitArray) -> Int64 {
   self.data.length().to_int64()
 }
 
 ///|
+/// Pad a `BitArray` to a full byte boundary.
 pub fn BitArray::pad_to_bytes(self : BitArray) -> BitArray {
   { data: self.data, bit_length: self.data.length().to_int64() * 8L }
 }
 
 ///|
+/// Concatenate an `ArrayView[BitArray]` into a single `BitArray`.
 pub fn BitArray::concat(parts : ArrayView[BitArray]) -> BitArray {
   let mut total_bits = 0L
   let mut all_aligned = true
@@ -477,53 +463,30 @@ pub fn BitArray::from_utf32(s : String, big_endian : Bool) -> BitArray {
 }
 
 ///|
-pub fn BitArray::utf8_codepoint_segment(cp : UtfCodepoint) -> BitArray {
+pub fn BitArray::utf8_codepoint_segment(cp : Char) -> BitArray {
   let buf = @buffer.Buffer()
-  write_utf8_cp(buf, cp.code.to_int())
+  write_utf8_cp(buf, cp.to_int())
   BitArray::from_bytes(buf.to_bytes())
 }
 
 ///|
 pub fn BitArray::utf16_codepoint_segment(
-  cp : UtfCodepoint,
+  cp : Char,
   big_endian : Bool,
 ) -> BitArray {
   let buf = @buffer.Buffer()
-  write_utf16_cp(buf, cp.code.to_int(), big_endian)
+  write_utf16_cp(buf, cp.to_int(), big_endian)
   BitArray::from_bytes(buf.to_bytes())
 }
 
 ///|
 pub fn BitArray::utf32_codepoint_segment(
-  cp : UtfCodepoint,
+  cp : Char,
   big_endian : Bool,
 ) -> BitArray {
   let buf = @buffer.Buffer()
-  write_u32(buf, cp.code.to_int(), big_endian)
+  write_u32(buf, cp.to_int(), big_endian)
   BitArray::from_bytes(buf.to_bytes())
-}
-
-///|
-pub fn BitArray::slice(
-  self : BitArray,
-  at : Int64,
-  take : Int64,
-) -> Result[BitArray, Unit] {
-  if self.bit_length % 8L != 0L || at < 0L {
-    return Err(())
-  }
-  let len = self.data.length().to_int64()
-  let (start, count) = if take < 0L {
-    (at + take, -take)
-  } else {
-    (at, take)
-  }
-  if start < 0L || start + count > len {
-    Err(())
-  } else {
-    let view = self.data[start.to_int():(start + count).to_int()]
-    Ok(BitArray::from_bytes(Bytes::from_iter(view.iter())))
-  }
 }
 
 ///|
@@ -787,13 +750,13 @@ pub fn bit_array_match_bits(
 pub fn bit_array_read_utf8_codepoint(
   ba : BitArray,
   offset : Int64,
-) -> Option[(UtfCodepoint, Int64)] {
+) -> Option[(Char, Int64)] {
   if offset < 0L || offset + 8L > ba.bit_length {
     return None
   }
   let b0 = bit_array_read_byte_at(ba, offset)
   if b0 <= 0x7F {
-    return Some(({ code: b0.to_int64() }, offset + 8L))
+    return Some((b0.unsafe_to_char(), offset + 8L))
   }
   if b0 >= 0xC2 && b0 <= 0xDF {
     if offset + 16L > ba.bit_length {
@@ -804,7 +767,7 @@ pub fn bit_array_read_utf8_codepoint(
       return None
     }
     let cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
-    return Some(({ code: cp.to_int64() }, offset + 16L))
+    return Some((cp.unsafe_to_char(), offset + 16L))
   }
   if b0 >= 0xE0 && b0 <= 0xEF {
     if offset + 24L > ba.bit_length {
@@ -822,7 +785,7 @@ pub fn bit_array_read_utf8_codepoint(
       return None
     }
     let cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
-    return Some(({ code: cp.to_int64() }, offset + 24L))
+    return Some((cp.unsafe_to_char(), offset + 24L))
   }
   if b0 >= 0xF0 && b0 <= 0xF4 {
     if offset + 32L > ba.bit_length {
@@ -841,7 +804,7 @@ pub fn bit_array_read_utf8_codepoint(
       return None
     }
     let cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
-    return Some(({ code: cp.to_int64() }, offset + 32L))
+    return Some((cp.unsafe_to_char(), offset + 32L))
   }
   None
 }
@@ -851,13 +814,13 @@ pub fn bit_array_read_utf16_codepoint(
   ba : BitArray,
   offset : Int64,
   big_endian : Bool,
-) -> Option[(UtfCodepoint, Int64)] {
+) -> Option[(Char, Int64)] {
   match bit_array_read_int(ba, offset, 16L, false, big_endian) {
     None => None
     Some(u1) => {
       let w1 = u1.to_int()
       if w1 < 0xD800 || w1 > 0xDFFF {
-        Some(({ code: u1 }, offset + 16L))
+        Some((w1.unsafe_to_char(), offset + 16L))
       } else if w1 <= 0xDBFF {
         match bit_array_read_int(ba, offset + 16L, 16L, false, big_endian) {
           None => None
@@ -865,7 +828,7 @@ pub fn bit_array_read_utf16_codepoint(
             let w2 = u2.to_int()
             if w2 >= 0xDC00 && w2 <= 0xDFFF {
               let cp = 0x10000 + ((w1 - 0xD800) << 10) + (w2 - 0xDC00)
-              Some(({ code: cp.to_int64() }, offset + 32L))
+              Some((cp.unsafe_to_char(), offset + 32L))
             } else {
               None
             }
@@ -883,12 +846,12 @@ pub fn bit_array_read_utf32_codepoint(
   ba : BitArray,
   offset : Int64,
   big_endian : Bool,
-) -> Option[(UtfCodepoint, Int64)] {
+) -> Option[(Char, Int64)] {
   match bit_array_read_int(ba, offset, 32L, false, big_endian) {
     None => None
     Some(cp) =>
       if cp >= 0L && cp <= 0x10FFFFL && !(cp >= 0xD800L && cp <= 0xDFFFL) {
-        Some(({ code: cp }, offset + 32L))
+        Some((cp.to_int().unsafe_to_char(), offset + 32L))
       } else {
         None
       }
@@ -896,6 +859,7 @@ pub fn bit_array_read_utf32_codepoint(
 }
 
 ///|
+/// Dynamically typed value backing `gleam/dynamic.Dynamic`.
 #derive(Eq, Debug)
 pub(all) enum Dynamic {
   DynNull
@@ -954,6 +918,11 @@ pub impl Hash for Dynamic with hash_combine(self, hasher) {
   }
 }
 
+// =============================================================================
+// Section 2: Compiler-Emitted Runtime Helpers
+// (Emitted by `gekko` codegen; not intended for direct FFI authoring.)
+// =============================================================================
+
 ///|
 pub fn int_div(a : Int64, b : Int64) -> Int64 {
   if b == 0L {
@@ -998,12 +967,14 @@ pub fn string_drop_prefix(s : String, prefix : String) -> String {
 }
 
 ///|
+/// Boxed 0-tuple wrapper for Gleam `#()`.
 #derive(Eq, Debug, Hash)
 pub(all) enum Tuple0 {
   Tuple0
 }
 
 ///|
+/// Boxed 1-tuple wrapper for Gleam `#(a)`.
 #derive(Eq, Debug, Hash)
 pub(all) struct Tuple1[A](A)
 
@@ -1018,9 +989,15 @@ pub fn inspect_fn(arity : Int) -> InspectFn {
 }
 
 ///|
+/// Trait powering Gleam's `echo` and `string.inspect`.
 pub(open) trait GleamInspect {
   gleam_inspect(Self) -> String
   gleam_inspect_as_char(Self) -> Int? = _
+}
+
+///|
+pub impl GleamInspect for Char with gleam_inspect(self) {
+  "UtfCodepoint(" + self.to_int().to_string() + ")"
 }
 
 ///|
@@ -1354,6 +1331,7 @@ pub impl GleamInspect for Dynamic with gleam_inspect(self) {
 }
 
 ///|
+/// Trait for converting Gleam values into `@gprelude.Dynamic`.
 pub(open) trait ToDynamic {
   to_dynamic(Self) -> Dynamic
 }
@@ -1394,8 +1372,8 @@ pub impl ToDynamic for BitArray with to_dynamic(self) {
 }
 
 ///|
-pub impl ToDynamic for UtfCodepoint with to_dynamic(self) {
-  DynInt(self.code)
+pub impl ToDynamic for Char with to_dynamic(self) {
+  DynInt(self.to_int().to_int64())
 }
 
 ///|

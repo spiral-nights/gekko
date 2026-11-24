@@ -13,6 +13,7 @@ import gleam/string
 import index/symbol_table.{type SymbolTable}
 import lower/desugar
 import lower/ir.{type IrFunction}
+import lower/mangle
 import moonbit/ffi_meta
 import project/ffi_config
 import project/loader
@@ -50,7 +51,7 @@ type InspectData {
 
 /// Inspect a resolved dependency `target_pkg` in `project_root` and return a
 /// formatted report of unmapped `@external` functions, zero-variant external
-/// types, and starter `gekko.toml` snippets.
+/// types, and starter `gleam.toml` + `#gekko.patch` snippets.
 pub fn inspect_package(
   project_root: String,
   target_pkg: String,
@@ -118,7 +119,10 @@ pub fn inspect_package(
       "\nAll reachable externals in '"
       <> data.pkg_name
       <> "' are already mapped."
-    _, _ -> "\nSuggested gekko.toml:\n" <> render_gekko_toml(data)
+    _, _ ->
+      "\nSuggested gleam.toml:\n"
+      <> render_shim_gleam_toml_section(data)
+      <> "\nAnnotate each patched MoonBit declaration in patches/<mod>/ with #gekko.patch.\n"
   }
 
   Ok(header <> types_section <> fns_section <> toml_section)
@@ -146,20 +150,19 @@ pub fn init_shim(
     <> shim_name
     <> "\"\nversion = \"0.1.0\"\ndescription = \"MoonBit shim overlay for "
     <> target_pkg
-    <> "\"\n"
+    <> "\"\n\n"
+    <> render_shim_gleam_toml_section(data)
   let placeholder_gleam =
     "//// Companion MoonBit shim overlay for `"
     <> target_pkg
     <> "`.\n\npub const target = \""
     <> target_pkg
     <> "\"\n"
-  let gekko_toml = render_gekko_toml(data)
   let patch_files = render_patch_files(data)
 
   let files = [
     #("gleam.toml", gleam_toml),
     #("src/" <> shim_name <> ".gleam", placeholder_gleam),
-    #("gekko.toml", gekko_toml),
     ..patch_files
   ]
 
@@ -447,10 +450,11 @@ fn format_mbt_fn_stub(f: IrFunction, ctx: moonbit_decl.EmitCtx) -> String {
       #([p_name <> " : " <> ty_str, ..ps], next_c)
     })
   let #(ret_str, _) = moonbit_decl.emit_type(f.return_type, ctx1)
+  let mangled_name = mangle.mangle_ident(f.name)
   "pub fn"
   <> generics
   <> " "
-  <> f.name
+  <> mangled_name
   <> "("
   <> string.join(list.reverse(params_rev), ", ")
   <> ") -> "
@@ -477,59 +481,18 @@ fn collect_patched_modules(data: InspectData) -> List(String) {
   |> list.sort(string.compare)
 }
 
-fn render_gekko_toml(data: InspectData) -> String {
+fn render_shim_gleam_toml_section(data: InspectData) -> String {
   let ver_constraint = suggest_semver_constraint(data.version)
-  let shim_sec =
-    "[shim]\ntarget = \""
-    <> data.pkg_name
-    <> "\"\nversion = \""
-    <> ver_constraint
-    <> "\"\n"
-
-  let mods = collect_patched_modules(data)
-  let patch_secs =
-    list.map(mods, fn(mod_name) {
-      let mod_tys =
-        list.filter_map(data.unmapped_types, fn(t) {
-          case t.mod_name == mod_name {
-            True -> Ok("  \"" <> t.type_name <> "\",")
-            False -> Error(Nil)
-          }
-        })
-      let mod_fns =
-        list.filter_map(data.unmapped_fns, fn(f) {
-          case f.mod_name == mod_name {
-            True -> Ok("  \"" <> f.fn_name <> "\",")
-            False -> Error(Nil)
-          }
-        })
-      let types_block = case mod_tys {
-        [] -> ""
-        lines -> "\ntypes = [\n" <> string.join(lines, "\n") <> "\n]"
-      }
-      let fns_block = case mod_fns {
-        [] -> ""
-        lines -> "\nfunctions = [\n" <> string.join(lines, "\n") <> "\n]"
-      }
-      "\n[patch.\""
-      <> data.pkg_name
-      <> ":"
-      <> mod_name
-      <> "\"]\nfile = \"patches/"
-      <> mod_name
-      <> ".mbt\""
-      <> types_block
-      <> fns_block
-      <> "\n"
-    })
-    |> string.concat
-
-  shim_sec <> patch_secs
+  "[tools.gekko.shim]\ntarget = \""
+  <> data.pkg_name
+  <> "\"\nversion = \""
+  <> ver_constraint
+  <> "\"\n"
 }
 
 fn render_patch_files(data: InspectData) -> List(#(String, String)) {
   let mods = collect_patched_modules(data)
-  list.map(mods, fn(mod_name) {
+  list.flat_map(mods, fn(mod_name) {
     let type_decls =
       list.filter_map(data.unmapped_types, fn(t) {
         case t.mod_name == mod_name {
@@ -544,7 +507,14 @@ fn render_patch_files(data: InspectData) -> List(#(String, String)) {
               glance.Public -> "pub "
               _ -> ""
             }
-            Ok("///|\n" <> vis <> "type " <> t.type_name <> params <> "\n")
+            Ok(
+              "///|\n#gekko.patch\n"
+              <> vis
+              <> "type "
+              <> t.type_name
+              <> params
+              <> "\n",
+            )
           }
         }
       })
@@ -552,22 +522,68 @@ fn render_patch_files(data: InspectData) -> List(#(String, String)) {
       list.filter_map(data.unmapped_fns, fn(f) {
         case f.mod_name == mod_name {
           False -> Error(Nil)
-          True ->
+          True -> {
+            let mangled = mangle.mangle_ident(f.fn_name)
+            let attr = case mangled == f.fn_name {
+              True -> "#gekko.patch"
+              False -> "#gekko.patch(\"" <> f.fn_name <> "\")"
+            }
             Ok(
               "///|\n"
+              <> attr
+              <> "\n"
               <> f.mbt_stub
               <> " {\n  abort(\"todo: "
               <> f.fn_name
               <> "\")\n}\n",
             )
+          }
         }
       })
-    let body = case list.append(type_decls, fn_decls) {
+    let raw_body = case list.append(type_decls, fn_decls) {
       [] -> "///|\n// Add co-located MoonBit patch implementations here.\n"
       blocks -> string.join(blocks, "\n")
     }
-    #("patches/" <> mod_name <> ".mbt", body)
+    let hints = gprelude_hints_for_stub(raw_body)
+    let body = case hints {
+      "" -> raw_body
+      _ -> hints <> "\n" <> raw_body
+    }
+    let base_name = filepath.base_name(mod_name)
+    [
+      #("patches/" <> mod_name <> "/moon.pkg", "import {\n}\n"),
+      #("patches/" <> mod_name <> "/" <> base_name <> ".mbt", body),
+    ]
   })
+}
+
+fn gprelude_hints_for_stub(body: String) -> String {
+  let hints = []
+  let hints = case string.contains(body, "@gprelude.Dynamic") {
+    True -> [
+      "// @gprelude.Dynamic: DynNull | DynBool | DynInt | DynFloat | DynString | DynBitArray | DynList | DynArray | DynMap",
+      ..hints
+    ]
+    False -> hints
+  }
+  let hints = case string.contains(body, "@gprelude.BitArray") {
+    True -> [
+      "// @gprelude.BitArray: BitArray::empty / from_bytes / from_string / concat",
+      ..hints
+    ]
+    False -> hints
+  }
+  let hints = case string.contains(body, "@gprelude.GList") {
+    True -> [
+      "// @gprelude.GList[T]: Nil | Cons(T, GList[T]), GList::from_array / to_array",
+      ..hints
+    ]
+    False -> hints
+  }
+  case hints {
+    [] -> ""
+    _ -> string.join(hints, "\n") <> "\n"
+  }
 }
 
 fn suggest_semver_constraint(version: String) -> String {

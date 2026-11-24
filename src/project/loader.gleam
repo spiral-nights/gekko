@@ -700,7 +700,7 @@ fn validate_dependency_externals(
                   <> int.to_string(line)
                   <> ":"
                   <> int.to_string(col)
-                  <> " (add an override in [tools.gekko.overrides] in gleam.toml or in gekko.toml)"
+                  <> " (add an override in [tools.gekko.overrides] in gleam.toml)"
                 [msg, ..err_acc]
               }
               False -> err_acc

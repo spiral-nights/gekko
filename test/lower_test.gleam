@@ -769,6 +769,7 @@ pub fn bit_array_tier2_lowering_and_emission_test() {
 
   // 5. Verify MoonBit codegen strings
   let #(mbt, _) = moonbit.emit_module(ir_mod)
+  assert string.contains(mbt, "(n : Int64, cp : Char, ba : @gprelude.BitArray)")
   assert string.contains(mbt, "{ bit_length: 0L, .. } => true")
   assert string.contains(mbt, "@gprelude.bit_array_read_int(")
   assert string.contains(mbt, "12L, true, false")

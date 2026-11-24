@@ -6,6 +6,7 @@ import gleam/string
 import project/cmd
 import project/ffi_config
 import project/loader
+import project/patch_discovery
 import project/prepass.{
   ExternalType, PackageCall, Patched, PreferErlang, PreferJavascript, WasmImport,
 }
@@ -172,6 +173,7 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
   let shim_a =
     ffi_config.PackageOverlay(
       ..empty_ov("shim_a"),
+      shim: Some(ffi_config.ShimMeta(target: "lib", version: None)),
       overrides: dict.from_list([
         #("lib:lib.foo", PackageCall("ffi_a", "foo")),
       ]),
@@ -179,6 +181,7 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
   let shim_b =
     ffi_config.PackageOverlay(
       ..empty_ov("shim_b"),
+      shim: Some(ffi_config.ShimMeta(target: "lib", version: None)),
       overrides: dict.from_list([
         #("lib:lib.foo", PackageCall("ffi_b", "foo")),
       ]),
@@ -186,6 +189,7 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
   let shim_c =
     ffi_config.PackageOverlay(
       ..empty_ov("shim_c"),
+      shim: Some(ffi_config.ShimMeta(target: "lib", version: None)),
       overrides: dict.from_list([
         #("lib:lib.bar", PackageCall("ffi_c", "bar")),
       ]),
@@ -257,19 +261,24 @@ pub fn multi_error_unmapped_externals_and_shim_cli_test() {
   assert string.contains(report, "raw_lib.OpaqueHandle")
   assert string.contains(report, "raw_lib.first")
   assert string.contains(report, "raw_lib.second")
-  assert string.contains(report, "[patch.\"raw_lib:raw_lib\"]")
+  assert string.contains(report, "[tools.gekko.shim]")
+  assert string.contains(report, "#gekko.patch")
 
-  // `gekko shim init raw_lib` scaffolds a valid co-located [patch] companion shim
+  // `gekko shim init raw_lib` scaffolds [tools.gekko.shim] in gleam.toml and
+  // #gekko.patch stubs in patches/<mod>/ without creating gekko.toml
   let shim_out = filepath.join(root, "gekko_raw_lib")
   let assert Ok(_) = shim_cli.init_shim(root, "raw_lib", Some(shim_out))
+  assert simplifile.is_file(filepath.join(shim_out, "gekko.toml")) != Ok(True)
   let assert Ok(shim_toml) =
-    simplifile.read(filepath.join(shim_out, "gekko.toml"))
+    simplifile.read(filepath.join(shim_out, "gleam.toml"))
+  assert string.contains(shim_toml, "[tools.gekko.shim]")
   assert string.contains(shim_toml, "target = \"raw_lib\"")
   assert string.contains(shim_toml, ">= 1.0.0 and < 2.0.0")
-  assert string.contains(shim_toml, "[patch.\"raw_lib:raw_lib\"]")
-  assert string.contains(shim_toml, "file = \"patches/raw_lib.mbt\"")
+  assert simplifile.is_file(filepath.join(shim_out, "patches/raw_lib/moon.pkg"))
+    == Ok(True)
   let assert Ok(stub_mbt) =
-    simplifile.read(filepath.join(shim_out, "patches/raw_lib.mbt"))
+    simplifile.read(filepath.join(shim_out, "patches/raw_lib/raw_lib.mbt"))
+  assert string.contains(stub_mbt, "#gekko.patch")
   assert string.contains(stub_mbt, "pub type OpaqueHandle")
   assert string.contains(stub_mbt, "pub fn first(")
   assert string.contains(stub_mbt, "pub fn second(")
@@ -290,7 +299,10 @@ pub fn companion_shim_end_to_end_moon_test() {
     == Ok(Nil)
   assert simplifile.create_directory_all(filepath.join(shim_dir, "src"))
     == Ok(Nil)
-  assert simplifile.create_directory_all(filepath.join(shim_dir, "patches"))
+  assert simplifile.create_directory_all(filepath.join(
+      shim_dir,
+      "patches/upstream_lib",
+    ))
     == Ok(Nil)
 
   // 1. Completely unmodified upstream library (zero @external(moonbit) pragmas)
@@ -310,33 +322,21 @@ pub fn companion_shim_end_to_end_moon_test() {
     )
     == Ok(Nil)
 
-  // 2. Companion shim package using unified co-located [patch] (no separate FFI pkg!)
+  // 2. Companion shim package using zero gekko.toml: [tools.gekko.*] in gleam.toml
+  //    + moon.pkg + #gekko.patch attributes
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
-      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n",
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 1.0.0 and < 2.0.0\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
-      to: filepath.join(shim_dir, "gekko.toml"),
-      contents: "
-[shim]
-target = \"upstream_lib\"
-version = \">= 1.0.0 and < 2.0.0\"
-
-[patch.\"upstream_lib:upstream_lib\"]
-file = \"patches/upstream_lib.mbt\"
-imports = [\"upstream_helper\", \"moonbitlang/core/math\"]
-types = [\"Handle\"]
-functions = [\"make_handle\", \"read_handle\"]
-
-[target_branch.\"upstream_lib:upstream_lib\"]
-prefer = \"javascript\"
-",
+      to: filepath.join(shim_dir, "patches/upstream_lib/moon.pkg"),
+      contents: "import {\n  \"upstream_helper\",\n  \"moonbitlang/core/math\",\n}\n",
     )
     == Ok(Nil)
   assert simplifile.write(
-      to: filepath.join(shim_dir, "patches/upstream_lib.mbt"),
-      contents: "///|\npub struct Handle {\n  value : Int64\n}\n\n///|\npub fn make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    let _ = @upstream_helper.helper_tag()\n    let _ = @math.floor(1.5)\n    Ok({ value: n })\n  }\n}\n\n///|\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
+      to: filepath.join(shim_dir, "patches/upstream_lib/upstream_lib.mbt"),
+      contents: "///|\n#gekko.patch\npub struct Handle {\n  value : Int64\n}\n\n///|\nfn private_helper(n : Int64) -> Int64 {\n  n\n}\n\n///|\n#gekko.patch\npub fn make_handle(n : Int64) -> Result[Handle, LibError] {\n  if n == 0L {\n    Err(Empty)\n  } else if n < 0L {\n    Err(BadCode(n))\n  } else {\n    let _ = @upstream_helper.helper_tag()\n    let _ = @math.floor(1.5)\n    Ok({ value: private_helper(n) })\n  }\n}\n\n///|\n#gekko.patch(\"read_handle\")\npub fn read_handle(h : Handle) -> Int64 {\n  h.value\n}\n",
     )
     == Ok(Nil)
 
@@ -374,24 +374,8 @@ prefer = \"javascript\"
 
   // 4. Verify stale patch file cleanup + version mismatch & stale override warnings
   assert simplifile.write(
-      to: filepath.join(shim_dir, "gekko.toml"),
-      contents: "
-[shim]
-target = \"upstream_lib\"
-version = \">= 2.0.0\"
-
-[patch.\"upstream_lib:upstream_lib\"]
-file = \"patches/upstream_lib.mbt\"
-types = [\"Handle\"]
-functions = [\"make_handle\", \"read_handle\"]
-
-[overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]
-package = \"upstream_ffi\"
-function = \"nope\"
-
-[target_branch.\"upstream_lib:upstream_lib\"]
-prefer = \"javascript\"
-",
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]\npackage = \"upstream_ffi\"\nfunction = \"nope\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   let assert Ok(summary2) = workspace.transpile_project(root, out_dir)
@@ -402,29 +386,11 @@ prefer = \"javascript\"
     string.contains(w, "upstream_lib:upstream_lib.nonexistent_fn")
   })
 
-  // Remove [patch] and verify stale __gekko_patch_*.mbt is deleted
+  // Remove patches/ and verify stale __gekko_patch_*.mbt is deleted
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(shim_dir, "patches"))
   assert simplifile.write(
-      to: filepath.join(shim_dir, "gekko.toml"),
-      contents: "
-[shim]
-target = \"upstream_lib\"
-version = \">= 2.0.0\"
-
-[type_overrides.\"upstream_lib:upstream_lib.Handle\"]
-package = \"gprelude\"
-type = \"Dynamic\"
-
-[overrides.\"upstream_lib:upstream_lib.make_handle\"]
-package = \"gprelude\"
-function = \"ignore\"
-
-[overrides.\"upstream_lib:upstream_lib.read_handle\"]
-package = \"gprelude\"
-function = \"ignore\"
-
-[target_branch.\"upstream_lib:upstream_lib\"]
-prefer = \"javascript\"
-",
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim]\ntarget = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.type_overrides.\"upstream_lib:upstream_lib.Handle\"]\npackage = \"gprelude\"\ntype = \"Dynamic\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.make_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.read_handle\"]\npackage = \"gprelude\"\nfunction = \"ignore\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   let _ = workspace.transpile_project(root, out_dir)
@@ -471,4 +437,129 @@ pub fn local_closure_trait_bound_propagation_test() {
   assert tst.exit_code == 0
 
   let _ = simplifile.delete(file_or_dir_at: root)
+}
+
+pub fn patch_discovery_attributes_and_moon_pkg_test() {
+  let mbt_src =
+    "// #gekko.patch inside comment must be ignored\n"
+    <> "let s = \"#gekko.patch inside string\"\n"
+    <> "#gekko.patch\n"
+    <> "#derive(Eq)\n"
+    <> "priv struct TransientDict[K, V] {\n  x : Int\n}\n\n"
+    <> "#gekko.patch(\"println\")\n"
+    <> "pub fn println_(s : String) -> Unit {\n  println(s)\n}\n\n"
+    <> "#gekko.patch\n"
+    <> "pub fn[K : Eq + Hash, V] get_or(k : K, v : V) -> V {\n  v\n}\n\n"
+    <> "fn private_helper() -> Unit { () }\n"
+  let assert Ok(attrs) =
+    patch_discovery.parse_mbt_patch_attributes(mbt_src, "test.mbt")
+  assert attrs
+    == [
+      patch_discovery.DiscoveredPatchAttr(
+        kind: patch_discovery.PatchType,
+        mbt_name: "TransientDict",
+        target_override: None,
+        line: 3,
+      ),
+      patch_discovery.DiscoveredPatchAttr(
+        kind: patch_discovery.PatchFn,
+        mbt_name: "println_",
+        target_override: Some("println"),
+        line: 9,
+      ),
+      patch_discovery.DiscoveredPatchAttr(
+        kind: patch_discovery.PatchFn,
+        mbt_name: "get_or",
+        target_override: None,
+        line: 14,
+      ),
+    ]
+
+  // Unknown #gekko.* attribute must fail
+  let assert Error(unk_err) =
+    patch_discovery.parse_mbt_patch_attributes(
+      "#gekko.bogus\npub fn f() -> Unit { () }\n",
+      "bad.mbt",
+    )
+  assert string.contains(unk_err, "Unknown attribute '#gekko.bogus'")
+
+  // Dangling #gekko.patch must fail
+  let assert Error(dangling_err) =
+    patch_discovery.parse_mbt_patch_attributes("#gekko.patch\n", "dangling.mbt")
+  assert string.contains(
+    dangling_err,
+    "must precede a fn, struct, enum, or type",
+  )
+
+  // moon.pkg import parsing
+  let moon_pkg_src =
+    "// comment\n"
+    <> "import {\n"
+    <> "  \"moonbitlang/core/json\",\n"
+    <> "  \"moonbitlang/core/string\" @str,\n"
+    <> "  \"gleam/dict\" as @d,\n"
+    <> "  \"my_shim/gprelude\",\n"
+    <> "}\n\n"
+    <> "test_import {\n"
+    <> "  \"ignored/test_pkg\",\n"
+    <> "}\n"
+  let assert Ok(imps) =
+    patch_discovery.parse_moon_pkg_imports(moon_pkg_src, "my_shim")
+  assert imps
+    == [
+      patch_discovery.DiscoveredImport("moonbitlang/core/json", None),
+      patch_discovery.DiscoveredImport("moonbitlang/core/string", Some("str")),
+      patch_discovery.DiscoveredImport("gleam/dict", Some("d")),
+    ]
+}
+
+pub fn dependency_overlay_security_scoping_test() {
+  let empty_ov = fn(pkg) {
+    ffi_config.PackageOverlay(
+      source_pkg: pkg,
+      shim: None,
+      overrides: dict.new(),
+      type_overrides: dict.new(),
+      module_patches: dict.new(),
+      target_branches: dict.new(),
+    )
+  }
+
+  // 1. Dependency with overrides and NO [tools.gekko.shim] must fail
+  let rogue_dep =
+    ffi_config.PackageOverlay(
+      ..empty_ov("rogue"),
+      overrides: dict.from_list([
+        #("gleam_stdlib:gleam/io.println", PackageCall("evil", "log")),
+      ]),
+    )
+  let assert Error(no_shim_err) =
+    ffi_config.merge_overlays([rogue_dep], empty_ov("app"))
+  assert string.contains(no_shim_err, "Security error")
+  assert string.contains(no_shim_err, "rogue")
+
+  // 2. Shim targeting pkg_a cannot patch pkg_b
+  let cross_target_shim =
+    ffi_config.PackageOverlay(
+      ..empty_ov("shim_a"),
+      shim: Some(ffi_config.ShimMeta(target: "pkg_a", version: None)),
+      overrides: dict.from_list([
+        #("pkg_b:pkg_b.fn1", PackageCall("evil", "fn1")),
+      ]),
+    )
+  let assert Error(cross_err) =
+    ffi_config.merge_overlays([cross_target_shim], empty_ov("app"))
+  assert string.contains(cross_err, "Security error")
+  assert string.contains(cross_err, "pkg_a")
+  assert string.contains(cross_err, "pkg_b:pkg_b.fn1")
+
+  // 3. Root project without [tools.gekko.shim] can override any package
+  let root_ov =
+    ffi_config.PackageOverlay(
+      ..empty_ov("app"),
+      overrides: dict.from_list([
+        #("pkg_b:pkg_b.fn1", PackageCall("local_ffi", "fn1")),
+      ]),
+    )
+  let assert Ok(_) = ffi_config.merge_overlays([], root_ov)
 }

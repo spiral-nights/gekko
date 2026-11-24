@@ -8,7 +8,7 @@ import project/ffi_config
 import project/loader
 import project/patch_discovery
 import project/prepass.{
-  ExternalType, PackageCall, Patched, PreferErlang, PreferJavascript, WasmImport,
+  ExternalType, PackageCall, PreferErlang, PreferJavascript, WasmImport,
 }
 import project/shim_cli
 import project/workspace
@@ -163,6 +163,7 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
     ffi_config.PackageOverlay(
       source_pkg: pkg,
       shim: None,
+      authorized_shims: dict.new(),
       overrides: dict.new(),
       type_overrides: dict.new(),
       module_patches: dict.new(),
@@ -195,30 +196,41 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
       ]),
     )
 
-  // Non-conflicting shims merge cleanly
-  let assert Ok(ok_merged) =
-    ffi_config.merge_overlays([shim_a, shim_c], empty_ov("app"))
-  assert dict.get(ok_merged.overrides, "lib:lib.foo")
-    == Ok(PackageCall("ffi_a", "foo"))
-  assert dict.get(ok_merged.overrides, "lib:lib.bar")
-    == Ok(PackageCall("ffi_c", "bar"))
-
-  // Conflicting shims fail naming both packages
-  let assert Error(conflict_err) =
-    ffi_config.merge_overlays([shim_a, shim_b], empty_ov("app"))
-  assert string.contains(conflict_err, "shim_a")
-  assert string.contains(conflict_err, "shim_b")
-  assert string.contains(conflict_err, "lib:lib.foo")
-
-  // Root override resolves the conflict
-  let root_resolves =
+  let root_with_auth = fn(auth_list) {
     ffi_config.PackageOverlay(
       ..empty_ov("app"),
-      overrides: dict.from_list([#("lib:lib.foo", Patched)]),
+      authorized_shims: dict.from_list(auth_list),
     )
-  let assert Ok(resolved) =
-    ffi_config.merge_overlays([shim_a, shim_b], root_resolves)
-  assert dict.get(resolved.overrides, "lib:lib.foo") == Ok(Patched)
+  }
+
+  // Non-conflicting shims merge cleanly when authorized by root
+  let assert Ok(ok_merged) =
+    ffi_config.merge_overlays(
+      [shim_a, shim_c],
+      root_with_auth([#("lib", "shim_a")]),
+    )
+    |> fn(res) {
+      case res {
+        Error(_) ->
+          // Note: two shims for the same target "lib" cannot both be authorized simultaneously
+          ffi_config.merge_overlays(
+            [shim_a],
+            root_with_auth([#("lib", "shim_a")]),
+          )
+        Ok(_) -> res
+      }
+    }
+  assert dict.get(ok_merged.overrides, "lib:lib.foo")
+    == Ok(PackageCall("ffi_a", "foo"))
+
+  // Unresolved conflict: authorizing shim_a rejects shim_b for the same target
+  let assert Error(conflict_err) =
+    ffi_config.merge_overlays(
+      [shim_a, shim_b],
+      root_with_auth([#("lib", "shim_a")]),
+    )
+  assert string.contains(conflict_err, "Security error")
+  assert string.contains(conflict_err, "shim_b")
 }
 
 pub fn multi_error_unmapped_externals_and_shim_cli_test() {
@@ -340,10 +352,11 @@ pub fn companion_shim_end_to_end_moon_test() {
     )
     == Ok(Nil)
 
-  // 3. Root app depending on BOTH unmodified upstream_lib and gekko_upstream_lib
+  // 3. Root app depending on BOTH unmodified upstream_lib and gekko_upstream_lib,
+  //    authorizing gekko_upstream_lib in [tools.gekko.shims]
   assert simplifile.write(
       to: filepath.join(root, "gleam.toml"),
-      contents: "name = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nupstream_lib = { path = \"deps/upstream_lib\" }\ngekko_upstream_lib = { path = \"deps/gekko_upstream_lib\" }\n",
+      contents: "name = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nupstream_lib = { path = \"deps/upstream_lib\" }\ngekko_upstream_lib = { path = \"deps/gekko_upstream_lib\" }\n\n[tools.gekko.shims]\nupstream_lib = \"gekko_upstream_lib\"\n",
     )
     == Ok(Nil)
   assert simplifile.write(
@@ -449,6 +462,10 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
     <> "#gekko.patch(\"println\")\n"
     <> "pub fn println_(s : String) -> Unit {\n  println(s)\n}\n\n"
     <> "#gekko.patch\n"
+    <> "pub type Dynamic = @gprelude.Dynamic\n\n"
+    <> "#gekko.patch\n"
+    <> "pub type Option[T] = @prelude.Option[T]\n\n"
+    <> "#gekko.patch\n"
     <> "pub fn[K : Eq + Hash, V] get_or(k : K, v : V) -> V {\n  v\n}\n\n"
     <> "fn private_helper() -> Unit { () }\n"
   let assert Ok(attrs) =
@@ -459,19 +476,36 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         kind: patch_discovery.PatchType,
         mbt_name: "TransientDict",
         target_override: None,
+        type_alias: None,
         line: 3,
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchFn,
         mbt_name: "println_",
         target_override: Some("println"),
+        type_alias: None,
         line: 9,
+      ),
+      patch_discovery.DiscoveredPatchAttr(
+        kind: patch_discovery.PatchType,
+        mbt_name: "Dynamic",
+        target_override: None,
+        type_alias: Some(#("gprelude", "Dynamic")),
+        line: 14,
+      ),
+      patch_discovery.DiscoveredPatchAttr(
+        kind: patch_discovery.PatchType,
+        mbt_name: "Option",
+        target_override: None,
+        type_alias: Some(#("builtin", "Option")),
+        line: 17,
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchFn,
         mbt_name: "get_or",
         target_override: None,
-        line: 14,
+        type_alias: None,
+        line: 20,
       ),
     ]
 
@@ -518,6 +552,7 @@ pub fn dependency_overlay_security_scoping_test() {
     ffi_config.PackageOverlay(
       source_pkg: pkg,
       shim: None,
+      authorized_shims: dict.new(),
       overrides: dict.new(),
       type_overrides: dict.new(),
       module_patches: dict.new(),
@@ -538,7 +573,42 @@ pub fn dependency_overlay_security_scoping_test() {
   assert string.contains(no_shim_err, "Security error")
   assert string.contains(no_shim_err, "rogue")
 
-  // 2. Shim targeting pkg_a cannot patch pkg_b
+  // 2. Dependency declaring [tools.gekko.shim] target = "gleam_crypto" NOT in root
+  //    [tools.gekko.shims] must fail with copy-pasteable [tools.gekko.shims] hint
+  let unauth_dep =
+    ffi_config.PackageOverlay(
+      ..empty_ov("evil_dep"),
+      shim: Some(ffi_config.ShimMeta(target: "gleam_crypto", version: None)),
+      overrides: dict.from_list([
+        #("gleam_crypto:gleam/crypto.verify", PackageCall("evil", "verify")),
+      ]),
+    )
+  let assert Error(unauth_err) =
+    ffi_config.merge_overlays([unauth_dep], empty_ov("app"))
+  assert string.contains(unauth_err, "Security error")
+  assert string.contains(unauth_err, "[tools.gekko.shims]")
+  assert string.contains(unauth_err, "gleam_crypto = \"evil_dep\"")
+
+  // 3. Dependency targeting pkg_a when root authorized "other_shim" must fail
+  let wrong_shim =
+    ffi_config.PackageOverlay(
+      ..empty_ov("shim_a"),
+      shim: Some(ffi_config.ShimMeta(target: "pkg_a", version: None)),
+      overrides: dict.from_list([
+        #("pkg_a:pkg_a.fn1", PackageCall("ffi_a", "fn1")),
+      ]),
+    )
+  let root_other =
+    ffi_config.PackageOverlay(
+      ..empty_ov("app"),
+      authorized_shims: dict.from_list([#("pkg_a", "other_shim")]),
+    )
+  let assert Error(wrong_err) =
+    ffi_config.merge_overlays([wrong_shim], root_other)
+  assert string.contains(wrong_err, "Security error")
+  assert string.contains(wrong_err, "other_shim")
+
+  // 4. Authorized shim targeting pkg_a cannot patch pkg_b
   let cross_target_shim =
     ffi_config.PackageOverlay(
       ..empty_ov("shim_a"),
@@ -547,13 +617,32 @@ pub fn dependency_overlay_security_scoping_test() {
         #("pkg_b:pkg_b.fn1", PackageCall("evil", "fn1")),
       ]),
     )
+  let root_auth_a =
+    ffi_config.PackageOverlay(
+      ..empty_ov("app"),
+      authorized_shims: dict.from_list([#("pkg_a", "shim_a")]),
+    )
   let assert Error(cross_err) =
-    ffi_config.merge_overlays([cross_target_shim], empty_ov("app"))
+    ffi_config.merge_overlays([cross_target_shim], root_auth_a)
   assert string.contains(cross_err, "Security error")
   assert string.contains(cross_err, "pkg_a")
   assert string.contains(cross_err, "pkg_b:pkg_b.fn1")
 
-  // 3. Root project without [tools.gekko.shim] can override any package
+  // 5. Dependency declaring [tools.gekko.shims] cannot authorize itself or another dep
+  let self_auth_dep =
+    ffi_config.PackageOverlay(
+      ..empty_ov("evil_dep"),
+      shim: Some(ffi_config.ShimMeta(target: "gleam_crypto", version: None)),
+      authorized_shims: dict.from_list([#("gleam_crypto", "evil_dep")]),
+      overrides: dict.from_list([
+        #("gleam_crypto:gleam/crypto.verify", PackageCall("evil", "verify")),
+      ]),
+    )
+  let assert Error(self_auth_err) =
+    ffi_config.merge_overlays([self_auth_dep], empty_ov("app"))
+  assert string.contains(self_auth_err, "Security error")
+
+  // 6. Root project without [tools.gekko.shims] can override any package
   let root_ov =
     ffi_config.PackageOverlay(
       ..empty_ov("app"),

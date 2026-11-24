@@ -132,8 +132,13 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         glance.Public -> "pub "
         glance.Private -> ""
       }
+      let defined_in_patch =
+        dict.has_key(ctx.ffi_metadata.types, #(ctx.current_module, td.name))
       case
-        package == "" || package == "builtin" || package == ctx.current_module,
+        package == ""
+        || package == "builtin"
+        || package == ctx.current_module
+        || defined_in_patch,
         type_name == td.name
       {
         True, True -> #("", ctx)

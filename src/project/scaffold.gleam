@@ -88,6 +88,9 @@ fn scaffold_into_dir(
     <> "\n"
     <> "[dev-dependencies]\n"
     <> "gleeunit = \">= 1.0.0 and < 2.0.0\"\n"
+    <> "\n"
+    <> "[tools.gekko.shims]\n"
+    <> "gleam_stdlib = \"gekko_stdlib\"\n"
 
   let gitignore = "build/\ndist/\n*.wasm\n*.exe\n"
 

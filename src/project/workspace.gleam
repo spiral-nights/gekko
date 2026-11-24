@@ -91,6 +91,12 @@ pub fn transpile_project_with_tests(
     overlays.shims,
     discovered_versions,
   ))
+  let auth_warnings =
+    ffi_config.check_authorized_shims(
+      overlays.authorized_shims,
+      discovered_versions,
+    )
+  let version_warnings = list.append(version_warnings, auth_warnings)
   use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
@@ -665,13 +671,26 @@ fn lookup_module_patches(
   list.filter_map(keys, fn(k) { dict.get(module_patches, k) })
 }
 
+fn is_builtin_alias_only_patch(patch: ffi_config.ModulePatch) -> Bool {
+  patch.types == []
+  && patch.functions == []
+  && patch.imports == []
+  && patch.type_aliases != []
+  && list.all(patch.type_aliases, fn(ta) {
+    let #(ty_name, ext_ty) = ta
+    ext_ty.package == "builtin" && ext_ty.type_name == ty_name
+  })
+}
+
 fn merge_patch_imports(
   mod_name: String,
   base_imports: List(#(String, String)),
   patches: List(ffi_config.ModulePatch),
   resolved_pkg_dirs: Dict(String, String),
 ) -> Result(List(#(String, String)), String) {
-  case patches {
+  let active_patches =
+    list.filter(patches, fn(p) { !is_builtin_alias_only_patch(p) })
+  case active_patches {
     [] -> Ok(base_imports)
     _ -> {
       let alias_to_pkg =
@@ -683,7 +702,7 @@ fn merge_patch_imports(
           dict.insert(acc, entry.0, entry.1)
         })
       let raw_extra =
-        list.flat_map(patches, fn(patch) {
+        list.flat_map(active_patches, fn(patch) {
           list.map(patch.imports, fn(imp) {
             let pkg_or_dir = case dict.get(resolved_pkg_dirs, imp.package) {
               Ok(mapped) -> mapped
@@ -773,7 +792,10 @@ fn sync_patched_files(
   target_dir: String,
   patches: List(ffi_config.ModulePatch),
 ) -> Result(Nil, String) {
-  let files = list.flat_map(patches, fn(patch) { patch.files })
+  let files =
+    patches
+    |> list.filter(fn(p) { !is_builtin_alias_only_patch(p) })
+    |> list.flat_map(fn(patch) { patch.files })
   use written_names <- result.try(
     list.index_fold(files, Ok(set.new()), fn(acc_res, f, idx) {
       use acc <- result.try(acc_res)

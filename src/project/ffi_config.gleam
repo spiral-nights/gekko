@@ -40,6 +40,7 @@ pub type ModulePatch {
     files: List(ModulePatchFile),
     imports: List(ModulePatchImport),
     types: List(String),
+    type_aliases: List(#(String, ExternalType)),
     functions: List(String),
   )
 }
@@ -49,6 +50,7 @@ pub type PackageOverlay {
   PackageOverlay(
     source_pkg: String,
     shim: Option(ShimMeta),
+    authorized_shims: Dict(String, String),
     overrides: Dict(String, FfiKind),
     type_overrides: Dict(String, ExternalType),
     module_patches: Dict(String, ModulePatch),
@@ -60,6 +62,7 @@ pub type PackageOverlay {
 pub type MergedOverlays {
   MergedOverlays(
     shims: List(#(String, ShimMeta)),
+    authorized_shims: Dict(String, String),
     overrides: Dict(String, FfiKind),
     override_sources: Dict(String, String),
     type_overrides: Dict(String, ExternalType),
@@ -75,6 +78,7 @@ pub type MergedOverlays {
 pub fn empty_merged_overlays() -> MergedOverlays {
   MergedOverlays(
     shims: [],
+    authorized_shims: dict.new(),
     overrides: dict.new(),
     override_sources: dict.new(),
     type_overrides: dict.new(),
@@ -1048,7 +1052,15 @@ fn extract_module_patch(
             "functions",
             key_name,
           ))
-          Ok(Some(ModulePatch(files:, imports:, types:, functions:)))
+          Ok(
+            Some(ModulePatch(
+              files:,
+              imports:,
+              types:,
+              type_aliases: [],
+              functions:,
+            )),
+          )
         }
       }
     }
@@ -1226,7 +1238,62 @@ fn collect_nested_entries(
   })
 }
 
-/// Load and merge all overlay sections (`shim`, `overrides`, `type_overrides`,
+/// Parse `[shims]` authorization allowlist from a `gekko.toml` string.
+pub fn parse_authorized_shims_gekko_toml(
+  content: String,
+) -> Result(Dict(String, String), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  extract_authorized_shims(parsed, ["shims"])
+}
+
+/// Parse `[tools.gekko.shims]` authorization allowlist from a `gleam.toml` string.
+pub fn parse_authorized_shims_gleam_toml(
+  content: String,
+) -> Result(Dict(String, String), String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  extract_authorized_shims(parsed, ["tools", "gekko", "shims"])
+}
+
+fn extract_authorized_shims(
+  parsed: Dict(String, Toml),
+  key_path: List(String),
+) -> Result(Dict(String, String), String) {
+  case tom.get_table(parsed, key_path) {
+    Error(tom.NotFound(_)) -> Ok(dict.new())
+    Error(err) -> Error(format_get_error(err))
+    Ok(table) ->
+      dict.to_list(table)
+      |> list.try_fold(dict.new(), fn(acc, entry) {
+        let #(target_pkg, val) = entry
+        case val {
+          tom.String(shim_pkg) ->
+            case string.trim(shim_pkg) {
+              "" ->
+                Error(
+                  "Shim authorization for '"
+                  <> target_pkg
+                  <> "' must not be empty",
+                )
+              trimmed -> Ok(dict.insert(acc, target_pkg, trimmed))
+            }
+          _ ->
+            Error(
+              "Shim authorization for '"
+              <> target_pkg
+              <> "' must be a String (shim package name)",
+            )
+        }
+      })
+  }
+}
+
+/// Load and merge all overlay sections (`shim`, `shims`, `overrides`, `type_overrides`,
 /// `patch`, `target_branch`) from a package's `gleam.toml` and `gekko.toml`.
 pub fn load_package_overlay(
   pkg_root: String,
@@ -1237,6 +1304,12 @@ pub fn load_package_overlay(
     None,
     parse_shim_gleam_toml,
     parse_shim_gekko_toml,
+  ))
+  use #(auth_g, auth_k) <- result.try(load_toml_pair(
+    pkg_root,
+    dict.new(),
+    parse_authorized_shims_gleam_toml,
+    parse_authorized_shims_gekko_toml,
   ))
   use #(ovr_g, ovr_k) <- result.try(load_toml_pair(
     pkg_root,
@@ -1267,6 +1340,7 @@ pub fn load_package_overlay(
     Some(_) -> shim_k
     None -> shim_g
   }
+  let authorized_shims = dict.merge(auth_g, auth_k)
   let explicit_overrides = dict.merge(ovr_g, ovr_k)
   let explicit_type_overrides = dict.merge(ty_g, ty_k)
   let target_branches = dict.merge(br_g, br_k)
@@ -1299,6 +1373,7 @@ pub fn load_package_overlay(
   Ok(PackageOverlay(
     source_pkg: pkg_name,
     shim:,
+    authorized_shims:,
     overrides:,
     type_overrides:,
     module_patches: resolved_patches,
@@ -1322,7 +1397,18 @@ fn convert_discovered_patches(
       list.map(p.imports, fn(i) {
         ModulePatchImport(package: i.package, alias: i.alias)
       })
-    ModulePatch(files:, imports:, types: p.types, functions: p.functions)
+    let type_aliases =
+      list.map(p.type_aliases, fn(entry) {
+        let #(ty_name, #(ext_pkg, ext_ty)) = entry
+        #(ty_name, ExternalType(package: ext_pkg, type_name: ext_ty))
+      })
+    ModulePatch(
+      files:,
+      imports:,
+      types: p.types,
+      type_aliases:,
+      functions: p.functions,
+    )
   })
 }
 
@@ -1346,6 +1432,11 @@ fn expand_patch_entries(
           mod_key <> "." <> ty_name,
           ExternalType(package: target_mod, type_name: ty_name),
         )
+      })
+    let next_tys =
+      list.fold(patch.type_aliases, next_tys, fn(m, entry) {
+        let #(ty_name, ext_ty) = entry
+        dict.insert(m, mod_key <> "." <> ty_name, ext_ty)
       })
     #(next_fns, next_tys)
   })
@@ -1416,10 +1507,13 @@ fn merge_two_patches(a: ModulePatch, b: ModulePatch) -> ModulePatch {
   let types =
     list.append(a.types, b.types)
     |> dedup_by(fn(t) { t })
+  let type_aliases =
+    list.append(a.type_aliases, b.type_aliases)
+    |> dedup_by(fn(t) { t })
   let functions =
     list.append(a.functions, b.functions)
     |> dedup_by(fn(f) { f })
-  ModulePatch(files:, imports:, types:, functions:)
+  ModulePatch(files:, imports:, types:, type_aliases:, functions:)
 }
 
 fn dedup_by(items: List(a), key_fn: fn(a) -> k) -> List(a) {
@@ -1442,7 +1536,11 @@ pub fn merge_overlays(
   dep_overlays: List(PackageOverlay),
   root_overlay: PackageOverlay,
 ) -> Result(MergedOverlays, String) {
-  use _ <- result.try(list.try_each(dep_overlays, validate_dep_overlay_scope))
+  use _ <- result.try(
+    list.try_each(dep_overlays, fn(dep) {
+      validate_dep_overlay_scope(dep, root_overlay.authorized_shims)
+    }),
+  )
 
   let shims =
     list.filter_map(dep_overlays, fn(ov) {
@@ -1497,6 +1595,7 @@ pub fn merge_overlays(
 
   Ok(MergedOverlays(
     shims:,
+    authorized_shims: root_overlay.authorized_shims,
     overrides: ovr_map,
     override_sources: ovr_src,
     type_overrides: ty_map,
@@ -1564,7 +1663,10 @@ fn merge_keyed_with_root(
   }
 }
 
-fn validate_dep_overlay_scope(dep: PackageOverlay) -> Result(Nil, String) {
+fn validate_dep_overlay_scope(
+  dep: PackageOverlay,
+  root_authorized_shims: Dict(String, String),
+) -> Result(Nil, String) {
   let has_any =
     !dict.is_empty(dep.overrides)
     || !dict.is_empty(dep.type_overrides)
@@ -1579,6 +1681,33 @@ fn validate_dep_overlay_scope(dep: PackageOverlay) -> Result(Nil, String) {
         <> "' defines gekko patches or overrides without declaring [tools.gekko.shim] target = \"<pkg>\" in gleam.toml",
       )
     True, Some(ShimMeta(target:, ..)) -> {
+      use _ <- result.try(case dict.get(root_authorized_shims, target) {
+        Ok(allowed_shim) if allowed_shim == dep.source_pkg -> Ok(Nil)
+        Ok(other_shim) ->
+          Error(
+            "Security error: dependency '"
+            <> dep.source_pkg
+            <> "' declares a shim targeting '"
+            <> target
+            <> "', but root gleam.toml authorizes '"
+            <> other_shim
+            <> "' for '"
+            <> target
+            <> "' in [tools.gekko.shims]",
+          )
+        Error(_) ->
+          Error(
+            "Security error: dependency '"
+            <> dep.source_pkg
+            <> "' declares a shim targeting '"
+            <> target
+            <> "', but is not authorized in root gleam.toml.\nTo allow this shim, add to your root gleam.toml:\n\n  [tools.gekko.shims]\n  "
+            <> target
+            <> " = \""
+            <> dep.source_pkg
+            <> "\"",
+          )
+      })
       let check_keys = fn(keys: List(String), allow_exact: Bool) {
         list.try_each(keys, fn(k) {
           let allowed =
@@ -1681,6 +1810,31 @@ pub fn check_shim_versions(
     }
   })
   |> result.map(fn(opts) { list.filter_map(opts, option.to_result(_, Nil)) })
+}
+
+/// Warn if any shim package authorized in root `[tools.gekko.shims]` is not a
+/// resolved dependency of the project.
+pub fn check_authorized_shims(
+  authorized_shims: Dict(String, String),
+  discovered_versions: Dict(String, String),
+) -> List(String) {
+  dict.to_list(authorized_shims)
+  |> list.filter_map(fn(entry) {
+    let #(target_pkg, shim_pkg) = entry
+    case dict.has_key(discovered_versions, shim_pkg) {
+      True -> Error(Nil)
+      False ->
+        Ok(
+          "Warning: [tools.gekko.shims] authorizes '"
+          <> shim_pkg
+          <> "' for '"
+          <> target_pkg
+          <> "', but '"
+          <> shim_pkg
+          <> "' is not a dependency of this project",
+        )
+    }
+  })
 }
 
 fn parse_version_constraint(

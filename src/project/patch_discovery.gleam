@@ -20,6 +20,7 @@ pub type DiscoveredPatchAttr {
     kind: PatchDeclKind,
     mbt_name: String,
     target_override: Option(String),
+    type_alias: Option(#(String, String)),
     line: Int,
   )
 }
@@ -44,6 +45,7 @@ pub type DiscoveredModulePatch {
     files: List(DiscoveredPatchFile),
     imports: List(DiscoveredImport),
     types: List(String),
+    type_aliases: List(#(String, #(String, String))),
     functions: List(String),
   )
 }
@@ -296,7 +298,7 @@ fn scan_mbt_lines(
                               )
                             }
                             Some(p) -> {
-                              use #(kind, mbt_name) <- result.try(
+                              use #(kind, mbt_name, type_alias) <- result.try(
                                 parse_decl_header(
                                   [raw_line, ..rest],
                                   file_path,
@@ -308,6 +310,7 @@ fn scan_mbt_lines(
                                   kind:,
                                   mbt_name:,
                                   target_override: p.target_override,
+                                  type_alias:,
                                   line: p.line,
                                 )
                               let #(next_depth, next_str) =
@@ -415,7 +418,7 @@ fn parse_decl_header(
   remaining_lines: List(String),
   file_path: String,
   attr_line: Int,
-) -> Result(#(PatchDeclKind, String), String) {
+) -> Result(#(PatchDeclKind, String, Option(#(String, String))), String) {
   let loc = file_path <> ":" <> int.to_string(attr_line)
   let joined =
     remaining_lines
@@ -447,7 +450,7 @@ fn parse_decl_header(
             <> loc
             <> " must precede a named fn, struct, enum, or type declaration",
           )
-        _ -> Ok(#(PatchFn, name))
+        _ -> Ok(#(PatchFn, name, None))
       }
     }
     _, True, _, _ | _, _, True, _ -> {
@@ -460,11 +463,13 @@ fn parse_decl_header(
             <> loc
             <> " must precede a named fn, struct, enum, or type declaration",
           )
-        _ -> Ok(#(PatchFn, name))
+        _ -> Ok(#(PatchFn, name, None))
       }
     }
-    _, _, _, Some(#(kind, rest)) -> {
-      let #(name, _) = read_ident(string.trim(rest))
+    _, _, _, Some(#("using", rest)) -> parse_using_type_alias(rest, loc)
+    _, _, _, Some(#(kw, rest)) -> {
+      let trimmed_rest = string.trim(rest)
+      let #(name, after_name) = read_ident(trimmed_rest)
       case name {
         "" ->
           Error(
@@ -472,7 +477,13 @@ fn parse_decl_header(
             <> loc
             <> " must precede a named fn, struct, enum, or type declaration",
           )
-        _ -> Ok(#(kind, name))
+        _ -> {
+          let alias_opt = case kw {
+            "type" -> parse_type_alias_rhs(after_name)
+            _ -> None
+          }
+          Ok(#(PatchType, name, alias_opt))
+        }
       }
     }
     _, _, _, None ->
@@ -484,22 +495,131 @@ fn parse_decl_header(
   }
 }
 
-fn read_keyword_decl(s: String) -> Option(#(PatchDeclKind, String)) {
-  let keywords = [
-    #("struct", PatchType),
-    #("enum", PatchType),
-    #("type", PatchType),
-    #("suberror", PatchType),
-  ]
-  list.find_map(keywords, fn(entry) {
-    let #(kw, kind) = entry
+fn parse_type_alias_rhs(after_name: String) -> Option(#(String, String)) {
+  let trimmed = string.trim(after_name)
+  let after_generics = case skip_balanced_brackets(trimmed) {
+    Ok(rest) -> string.trim(rest)
+    Error(_) -> trimmed
+  }
+  case string.starts_with(after_generics, "=") {
+    False -> None
+    True -> {
+      let rhs = string.trim(string.drop_start(after_generics, 1))
+      parse_alias_target_type(rhs)
+    }
+  }
+}
+
+fn parse_alias_target_type(rhs: String) -> Option(#(String, String)) {
+  case string.starts_with(rhs, "@") {
+    True -> {
+      let #(pkg_alias, after_pkg) = read_ident(string.drop_start(rhs, 1))
+      case pkg_alias != "" && string.starts_with(after_pkg, ".") {
+        True -> {
+          let #(ty_name, _) = read_ident(string.drop_start(after_pkg, 1))
+          case ty_name {
+            "" -> None
+            _ -> Some(#(normalize_alias_pkg(pkg_alias), ty_name))
+          }
+        }
+        False -> None
+      }
+    }
+    False -> {
+      let #(ty_name, _) = read_ident(rhs)
+      case ty_name {
+        "" -> None
+        _ -> Some(#("builtin", ty_name))
+      }
+    }
+  }
+}
+
+fn normalize_alias_pkg(pkg_alias: String) -> String {
+  case pkg_alias {
+    "prelude" | "builtin" -> "builtin"
+    _ -> pkg_alias
+  }
+}
+
+fn parse_using_type_alias(
+  rest: String,
+  loc: String,
+) -> Result(#(PatchDeclKind, String, Option(#(String, String))), String) {
+  let trimmed = string.trim(rest)
+  case string.starts_with(trimmed, "@") {
+    False ->
+      Error(
+        "#gekko.patch at "
+        <> loc
+        <> " using declaration must reference @package { type Name }",
+      )
+    True -> {
+      let #(pkg_alias, after_pkg) = read_ident(string.drop_start(trimmed, 1))
+      let after_brace = string.trim(after_pkg)
+      case string.starts_with(after_brace, "{") {
+        False ->
+          Error(
+            "#gekko.patch at "
+            <> loc
+            <> " using declaration must have { type Name }",
+          )
+        True -> {
+          let inner = string.trim(string.drop_start(after_brace, 1))
+          case
+            string.starts_with(inner, "type ")
+            || string.starts_with(inner, "type\t")
+          {
+            False ->
+              Error(
+                "#gekko.patch at "
+                <> loc
+                <> " using declaration must re-export a single 'type'",
+              )
+            True -> {
+              let #(target_ty, after_ty) =
+                read_ident(string.trim(string.drop_start(inner, 4)))
+              let after_ty_trim = string.trim(after_ty)
+              let local_name = case string.starts_with(after_ty_trim, "as ") {
+                True -> {
+                  let #(n, _) =
+                    read_ident(string.trim(string.drop_start(after_ty_trim, 3)))
+                  n
+                }
+                False -> target_ty
+              }
+              case pkg_alias != "" && target_ty != "" && local_name != "" {
+                True ->
+                  Ok(#(
+                    PatchType,
+                    local_name,
+                    Some(#(normalize_alias_pkg(pkg_alias), target_ty)),
+                  ))
+                False ->
+                  Error(
+                    "#gekko.patch at "
+                    <> loc
+                    <> " has invalid using type alias syntax",
+                  )
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn read_keyword_decl(s: String) -> Option(#(String, String)) {
+  let keywords = ["struct", "enum", "type", "suberror", "using"]
+  list.find_map(keywords, fn(kw) {
     let len = string.length(kw)
     case
       string.starts_with(s, kw <> " ")
       || string.starts_with(s, kw <> "\t")
       || string.starts_with(s, kw <> "[")
     {
-      True -> Ok(#(kind, string.drop_start(s, len)))
+      True -> Ok(#(kw, string.drop_start(s, len)))
       False -> Error(Nil)
     }
   })
@@ -736,6 +856,7 @@ fn discover_pkg_dir_patch(
               files: patch_files,
               imports:,
               types: [],
+              type_aliases: [],
               functions: [],
             ),
           ))
@@ -746,10 +867,11 @@ fn discover_pkg_dir_patch(
         attrs,
         default_mod,
         target_pkg,
+        imports,
       ))
       Ok(
-        dict.fold(by_mod, acc, fn(m, mod_key, pair) {
-          let #(types, functions) = pair
+        dict.fold(by_mod, acc, fn(m, mod_key, triple) {
+          let #(types, type_aliases, functions) = triple
           merge_discovered_patch(
             m,
             mod_key,
@@ -757,6 +879,7 @@ fn discover_pkg_dir_patch(
               files: patch_files,
               imports:,
               types:,
+              type_aliases:,
               functions:,
             ),
           )
@@ -801,14 +924,12 @@ fn discover_single_file_patch(
           dest_filename: filename,
           source_pkg: pkg_name,
         )
-      use by_mod <- result.try(group_attrs_by_module(
-        attrs,
-        default_mod,
-        target_pkg,
-      ))
+      use by_mod <- result.try(
+        group_attrs_by_module(attrs, default_mod, target_pkg, []),
+      )
       Ok(
-        dict.fold(by_mod, acc, fn(m, mod_key, pair) {
-          let #(types, functions) = pair
+        dict.fold(by_mod, acc, fn(m, mod_key, triple) {
+          let #(types, type_aliases, functions) = triple
           merge_discovered_patch(
             m,
             mod_key,
@@ -816,6 +937,7 @@ fn discover_single_file_patch(
               files: [pfile],
               imports: [],
               types:,
+              type_aliases:,
               functions:,
             ),
           )
@@ -829,22 +951,58 @@ fn group_attrs_by_module(
   attrs: List(DiscoveredPatchAttr),
   default_mod: String,
   target_pkg: Option(String),
-) -> Result(Dict(String, #(List(String), List(String))), String) {
+  imports: List(DiscoveredImport),
+) -> Result(
+  Dict(
+    String,
+    #(List(String), List(#(String, #(String, String))), List(String)),
+  ),
+  String,
+) {
+  let alias_to_pkg = build_import_alias_map(imports)
   list.try_fold(attrs, dict.new(), fn(acc, attr) {
     use #(mod_key, sym_name) <- result.try(resolve_attr_target(
       attr,
       default_mod,
       target_pkg,
     ))
-    let #(tys, fns) = case dict.get(acc, mod_key) {
+    let #(tys, aliases, fns) = case dict.get(acc, mod_key) {
       Ok(existing) -> existing
-      Error(_) -> #([], [])
+      Error(_) -> #([], [], [])
     }
-    let next_pair = case attr.kind {
-      PatchType -> #(list.append(tys, [sym_name]), fns)
-      PatchFn -> #(tys, list.append(fns, [sym_name]))
+    let next_triple = case attr.kind, attr.type_alias {
+      PatchType, Some(#(raw_pkg, target_ty)) -> {
+        let resolved_pkg = case dict.get(alias_to_pkg, raw_pkg) {
+          Ok(full_pkg) -> full_pkg
+          Error(_) -> raw_pkg
+        }
+        #(
+          tys,
+          list.append(aliases, [#(sym_name, #(resolved_pkg, target_ty))]),
+          fns,
+        )
+      }
+      PatchType, None -> #(list.append(tys, [sym_name]), aliases, fns)
+      PatchFn, _ -> #(tys, aliases, list.append(fns, [sym_name]))
     }
-    Ok(dict.insert(acc, mod_key, next_pair))
+    Ok(dict.insert(acc, mod_key, next_triple))
+  })
+}
+
+fn build_import_alias_map(
+  imports: List(DiscoveredImport),
+) -> Dict(String, String) {
+  list.fold(imports, dict.new(), fn(acc, imp) {
+    let alias = case imp.alias {
+      Some(a) -> a
+      None ->
+        imp.package
+        |> string.split("/")
+        |> list.filter(fn(s) { s != "" })
+        |> list.last
+        |> result.unwrap(imp.package)
+    }
+    dict.insert(acc, alias, imp.package)
   })
 }
 
@@ -921,6 +1079,10 @@ fn merge_discovered_patch(
           files: dedup(list.append(existing.files, patch.files)),
           imports: dedup(list.append(existing.imports, patch.imports)),
           types: dedup(list.append(existing.types, patch.types)),
+          type_aliases: dedup(list.append(
+            existing.type_aliases,
+            patch.type_aliases,
+          )),
           functions: dedup(list.append(existing.functions, patch.functions)),
         ),
       )

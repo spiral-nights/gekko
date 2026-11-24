@@ -196,7 +196,12 @@ pub fn init_shim(
     <> "' for '"
     <> target_pkg
     <> "':\n"
-    <> created,
+    <> created
+    <> "\n\nConsumers should authorize this shim in their root gleam.toml:\n\n  [tools.gekko.shims]\n  "
+    <> target_pkg
+    <> " = \""
+    <> shim_name
+    <> "\"",
   )
 }
 

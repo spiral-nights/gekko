@@ -665,7 +665,7 @@ pub fn loader_dependency_fallback_and_unmapped_error_test() {
     unmapped_err,
     "Unmapped external function bad_pkg:bad_mod.missing at bad_pkg:src/bad_mod.gleam:",
   )
-  assert string.contains(unmapped_err, "[tools.gekko.overrides]")
+  assert string.contains(unmapped_err, "gekko shim init")
 
   // Adding a gekko.toml override satisfies validation and loads both deps
   assert simplifile.write(

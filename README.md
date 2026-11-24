@@ -294,12 +294,12 @@ import {
 pub fn fast_sqrt(x: Float) -> Float
 ```
 
-To use **unmodified third-party Hex packages** that contain Erlang/JS externals without forking them, `gekko` supports **companion shim / overlay packages** (`[tools.gekko.*]` in `gleam.toml` + `patches/`):
+To use **unmodified third-party Hex packages** that contain Erlang/JS externals without forking them, `gekko` supports **companion shim / overlay packages** (`[tools.gekko.shims]` in your root `gleam.toml` + `patches/` in the shim):
 
-- **`[tools.gekko.shim]`**: Declares the target package and SemVer range (`target`, `version`) and confines the shim to patching only `target`.
-- **`patches/` + `#gekko.patch`**: Co-locates `.mbt` patch files (and `moon.pkg` imports) directly inside the transpiled module's MoonBit package—eliminating circular package dependencies.
-- **`[tools.gekko.type_overrides."pkg:mod.Type"]`** & **`[tools.gekko.overrides."pkg:mod.fn"]`**: Direct one-line aliases to MoonBit `builtin` / `gprelude` / external packages or `wasm_module` imports.
-- **`[tools.gekko.target_branch."pkg:mod"]`**: Selects `prefer = "javascript"` or `"erlang"` for `@target(...)` blocks.
+- **`[tools.gekko.shims]`** *(in root `gleam.toml`)*: Explicit allowlist authorizing which shim package may patch each target dependency (`gleam_stdlib = "gekko_stdlib"`).
+- **`[tools.gekko.shim]`** *(in shim `gleam.toml`)*: Declares the target package and SemVer range (`target`, `version`).
+- **`patches/` + `#gekko.patch`**: Co-locates `.mbt` patch files (and `moon.pkg` imports) directly inside the transpiled module's MoonBit package—supporting functions, types, and `pub type Alias = Target` type aliases while eliminating circular package dependencies.
+- **`[tools.gekko.target_branch."pkg:mod"]`**: Optional selector for `prefer = "javascript"` or `"erlang"` on `@target(...)` blocks.
 
 Use `gekko shim inspect <pkg>` and `gekko shim init <pkg>` to audit a dependency and scaffold a typed shim skeleton. See **[`docs/SHIMS.md`](./docs/SHIMS.md)** for the full guide and configuration reference.
 

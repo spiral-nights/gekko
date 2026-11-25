@@ -1,3 +1,4 @@
+import common/fs
 import emit/prelude_runtime
 import filepath
 import gleam/dict.{type Dict}
@@ -134,7 +135,7 @@ fn scan_moonbit_root(
     Error(_) -> meta
     Ok(entries) ->
       list.fold(entries, meta, fn(acc, entry) {
-        case is_ignored_entry(entry) {
+        case fs.is_ignored_entry(entry) {
           True -> acc
           False -> {
             let full_path = filepath.join(moonbit_root, entry)
@@ -160,7 +161,7 @@ fn visit_pkg_dir(
       let #(mbt_files, subdirs) =
         list.fold(entries, #([], []), fn(parts, entry) {
           let #(files_acc, dirs_acc) = parts
-          case is_ignored_entry(entry) {
+          case fs.is_ignored_entry(entry) {
             True -> parts
             False -> {
               let full = filepath.join(cur_dir, entry)
@@ -209,10 +210,6 @@ fn read_sorted_entries(dir: String) -> Result(List(String), Nil) {
   simplifile.read_directory(at: dir)
   |> result.map(fn(xs) { list.sort(xs, string.compare) })
   |> result.replace_error(Nil)
-}
-
-fn is_ignored_entry(name: String) -> Bool {
-  string.starts_with(name, ".") || name == "_build" || name == "target"
 }
 
 /// Scan a single MoonBit `.mbt` file for type traits and generic FFI function signatures.

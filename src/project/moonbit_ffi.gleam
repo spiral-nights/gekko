@@ -1,3 +1,4 @@
+import common/fs
 import emit/pkg_config
 import filepath
 import gleam/list
@@ -89,16 +90,12 @@ fn read_sorted_dir(dir: String) -> Result(List(String), String) {
   })
 }
 
-fn is_ignored_entry(name: String) -> Bool {
-  string.starts_with(name, ".") || name == "_build" || name == "target"
-}
-
 fn check_no_loose_root_files(
   moonbit_root: String,
   entries: List(String),
 ) -> Result(Nil, String) {
   list.try_each(entries, fn(entry) {
-    case is_ignored_entry(entry) {
+    case fs.is_ignored_entry(entry) {
       True -> Ok(Nil)
       False -> {
         let full_path = filepath.join(moonbit_root, entry)
@@ -132,7 +129,7 @@ fn walk_root_subdirs(
   acc: List(String),
 ) -> Result(List(String), String) {
   list.try_fold(entries, acc, fn(cur_acc, entry) {
-    case is_ignored_entry(entry) {
+    case fs.is_ignored_entry(entry) {
       True -> Ok(cur_acc)
       False -> {
         let full_path = filepath.join(moonbit_root, entry)
@@ -169,7 +166,7 @@ fn visit_package_dir(
   let #(rev_files, rev_subdirs) =
     list.fold(entries, #([], []), fn(parts, entry) {
       let #(files_acc, dirs_acc) = parts
-      case is_ignored_entry(entry) {
+      case fs.is_ignored_entry(entry) {
         True -> parts
         False -> {
           let full = filepath.join(cur_dir, entry)

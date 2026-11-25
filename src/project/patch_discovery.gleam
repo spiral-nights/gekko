@@ -1,3 +1,4 @@
+import common/fs
 import filepath
 import gleam/dict.{type Dict}
 import gleam/int
@@ -687,7 +688,7 @@ fn walk_patches_dir(
       <> simplifile.describe_error(err)
     }),
   )
-  let visible = list.filter(entries, fn(e) { !is_ignored_entry(e) })
+  let visible = list.filter(entries, fn(e) { !fs.is_ignored_entry(e) })
   let has_moon_pkg = list.contains(visible, "moon.pkg")
 
   let #(mbt_files, subdirs) =
@@ -1079,10 +1080,6 @@ fn dedup(items: List(a)) -> List(a) {
 fn canonical_path(path: String) -> String {
   simplifile.resolve(path)
   |> result.unwrap(filepath.expand(path) |> result.unwrap(path))
-}
-
-fn is_ignored_entry(name: String) -> Bool {
-  string.starts_with(name, ".") || name == "_build" || name == "target"
 }
 
 // -----------------------------------------------------------------------------

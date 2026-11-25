@@ -15,6 +15,8 @@ pub fn wit_parser_and_deps_unit_test() {
   assert wit_ast.kebab_to_pascal("my-greeting-error") == "MyGreetingError"
   assert wit_ast.kebab_to_screaming("debug-info") == "DEBUG_INFO"
   assert wit_ast.escape_gleam_ident("type") == "type_"
+  assert wit_ast.escape_gleam_ident("test") == "test_"
+  assert wit_ast.escape_gleam_ident("macro") == "macro_"
   assert wit_ast.escape_gleam_ident("greet") == "greet"
   assert wit_ast.escape_erlang_reserved_module("logger") == "logger_export"
   assert wit_ast.escape_erlang_reserved_module("api") == "api"

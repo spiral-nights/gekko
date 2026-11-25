@@ -1,3 +1,4 @@
+import common/gleam_ident
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
@@ -208,31 +209,7 @@ pub fn kebab_to_screaming(name: String) -> String {
 
 /// Append `_` if `name` is a reserved Gleam keyword.
 pub fn escape_gleam_ident(name: String) -> String {
-  case name {
-    "as"
-    | "assert"
-    | "auto"
-    | "case"
-    | "const"
-    | "delegate"
-    | "derive"
-    | "echo"
-    | "else"
-    | "fn"
-    | "if"
-    | "implement"
-    | "import"
-    | "let"
-    | "macro"
-    | "opaque"
-    | "panic"
-    | "pub"
-    | "test"
-    | "todo"
-    | "type"
-    | "use" -> name <> "_"
-    _ -> name
-  }
+  gleam_ident.escape(name)
 }
 
 /// Map a WIT value/function/field/parameter name to a valid Gleam identifier.

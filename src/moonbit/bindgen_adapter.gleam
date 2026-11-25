@@ -1,3 +1,4 @@
+import common/gleam_ident
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -1189,25 +1190,7 @@ pub fn sanitize_gleam_type_var(tp: String) -> String {
 }
 
 pub fn escape_gleam_ident(name: String) -> String {
-  case name {
-    "as"
-    | "assert"
-    | "case"
-    | "const"
-    | "echo"
-    | "else"
-    | "fn"
-    | "if"
-    | "import"
-    | "let"
-    | "opaque"
-    | "panic"
-    | "pub"
-    | "todo"
-    | "type"
-    | "use" -> name <> "_"
-    _ -> name
-  }
+  gleam_ident.escape(name)
 }
 
 pub fn mangle_moon_ident(name: String) -> String {

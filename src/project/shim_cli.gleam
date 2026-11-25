@@ -16,6 +16,7 @@ import lower/ir.{type IrFunction}
 import lower/mangle
 import moonbit/ffi_meta
 import project/ffi_config
+import project/fs
 import project/loader
 import project/staging
 import project/text_edit
@@ -169,21 +170,7 @@ pub fn init_shim(
   use _ <- result.try(
     list.try_each(files, fn(entry) {
       let #(rel, contents) = entry
-      let full = filepath.join(shim_dir, rel)
-      let dir = filepath.directory_name(full)
-      use _ <- result.try(
-        simplifile.create_directory_all(dir)
-        |> result.map_error(fn(err) {
-          "Failed to create directory "
-          <> dir
-          <> ": "
-          <> simplifile.describe_error(err)
-        }),
-      )
-      simplifile.write(to: full, contents:)
-      |> result.map_error(fn(err) {
-        "Failed to write " <> full <> ": " <> simplifile.describe_error(err)
-      })
+      fs.write_text(filepath.join(shim_dir, rel), contents)
     }),
   )
 

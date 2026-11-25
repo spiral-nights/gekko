@@ -1,0 +1,67 @@
+import filepath
+import gleam/result
+import gleam/string
+import simplifile
+
+/// Read a UTF-8 text file, reporting failures with the path in the message.
+pub fn read_text(path: String) -> Result(String, String) {
+  simplifile.read(from: path)
+  |> result.map_error(fn(err) {
+    "Failed to read '" <> path <> "': " <> simplifile.describe_error(err)
+  })
+}
+
+/// Create `dir` and any missing parents.
+pub fn ensure_dir(dir: String) -> Result(Nil, String) {
+  simplifile.create_directory_all(dir)
+  |> result.map_error(fn(err) {
+    "Failed to create directory '"
+    <> dir
+    <> "': "
+    <> simplifile.describe_error(err)
+  })
+}
+
+/// Write `contents` to `path`, creating parent directories as needed.
+pub fn write_text(path: String, contents: String) -> Result(Nil, String) {
+  use _ <- result.try(ensure_dir(filepath.directory_name(path)))
+  simplifile.write(to: path, contents:)
+  |> result.map_error(fn(err) {
+    "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
+  })
+}
+
+/// Write `contents` to `path` unless the file already holds those bytes.
+pub fn write_text_if_changed(
+  path: String,
+  contents: String,
+) -> Result(Nil, String) {
+  case simplifile.read(from: path) {
+    Ok(existing) if existing == contents -> Ok(Nil)
+    _ -> write_text(path, contents)
+  }
+}
+
+/// Copy `src` to `dst` unless `dst` already holds identical bytes.
+pub fn copy_if_changed(src: String, dst: String) -> Result(Nil, String) {
+  use bytes <- result.try(
+    simplifile.read_bits(from: src)
+    |> result.map_error(fn(err) {
+      "Failed to read '" <> src <> "': " <> simplifile.describe_error(err)
+    }),
+  )
+  case simplifile.read_bits(from: dst) {
+    Ok(existing) if existing == bytes -> Ok(Nil)
+    _ ->
+      simplifile.write_bits(to: dst, bits: bytes)
+      |> result.map_error(fn(err) {
+        "Failed to write '" <> dst <> "': " <> simplifile.describe_error(err)
+      })
+  }
+}
+
+/// Names that directory scans consistently skip: hidden entries, MoonBit's
+/// `_build` output, and the legacy `target` directory.
+pub fn is_ignored_entry(name: String) -> Bool {
+  string.starts_with(name, ".") || name == "_build" || name == "target"
+}

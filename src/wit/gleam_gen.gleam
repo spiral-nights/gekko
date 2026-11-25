@@ -6,6 +6,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import lower/mangle
+import project/fs
 import simplifile
 import wit/ast.{
   type ResolvedWit, type WitFunc, type WitInterface, type WitPackageId,
@@ -55,7 +56,7 @@ pub fn generate_project_bindings(
               let mod_path = gleam_types_module(resolved.root_pkg, iface)
               let rel_path = "src/" <> mod_path <> ".gleam"
               let content = render_types_module(resolved, iface)
-              use _ <- result.try(write_file(
+              use _ <- result.try(fs.write_text(
                 filepath.join(project_root, rel_path),
                 content,
               ))
@@ -97,7 +98,7 @@ pub fn generate_project_bindings(
           let rel_path = "src/" <> mod_path <> ".gleam"
           let adapter_pkg = moonbit_imp_adapter_pkg(iface)
           let content = render_import_module(resolved, iface, adapter_pkg)
-          use _ <- result.try(write_file(
+          use _ <- result.try(fs.write_text(
             filepath.join(project_root, rel_path),
             content,
           ))
@@ -121,7 +122,7 @@ pub fn generate_project_bindings(
       let rel_path = "src/" <> mod_path <> ".gleam"
       let adapter_pkg = moonbit_world_imp_adapter_pkg(resolved.world)
       let content = render_world_import_module(resolved, funcs, adapter_pkg)
-      use _ <- result.try(write_file(
+      use _ <- result.try(fs.write_text(
         filepath.join(project_root, rel_path),
         content,
       ))
@@ -142,7 +143,7 @@ pub fn generate_project_bindings(
             Ok(True) -> Ok(#(w_acc, c_acc, [rel_path, ..s_acc]))
             _ -> {
               let content = render_export_stub_module(resolved, iface)
-              use _ <- result.try(write_file(full_path, content))
+              use _ <- result.try(fs.write_text(full_path, content))
               Ok(#([rel_path, ..w_acc], [rel_path, ..c_acc], s_acc))
             }
           }
@@ -169,7 +170,7 @@ pub fn generate_project_bindings(
           Ok(True) -> Ok(#(rev_written, rev_created, [rel_path, ..rev_skipped]))
           _ -> {
             let content = render_world_export_stub_module(resolved, funcs)
-            use _ <- result.try(write_file(full_path, content))
+            use _ <- result.try(fs.write_text(full_path, content))
             Ok(#(
               [rel_path, ..rev_written],
               [rel_path, ..rev_created],
@@ -757,21 +758,4 @@ fn render_imports_excluding(
     [] -> ""
     lines -> string.join(lines, "\n") <> "\n\n"
   }
-}
-
-fn write_file(path: String, contents: String) -> Result(Nil, String) {
-  let dir = filepath.directory_name(path)
-  use _ <- result.try(
-    simplifile.create_directory_all(dir)
-    |> result.map_error(fn(err) {
-      "Failed to create directory '"
-      <> dir
-      <> "': "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  simplifile.write(to: path, contents:)
-  |> result.map_error(fn(err) {
-    "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
-  })
 }

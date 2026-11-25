@@ -3,6 +3,7 @@ import gleam/list
 import gleam/option.{None}
 import gleam/result
 import gleam/string
+import project/fs
 import simplifile
 import wit/gleam_gen
 import wit/parser as wit_parser
@@ -122,7 +123,7 @@ fn scaffold_into_dir(
     list.try_fold(files, [], fn(acc, entry) {
       let #(rel, content) = entry
       let full = filepath.join(root, rel)
-      use _ <- result.try(write_text(full, content))
+      use _ <- result.try(fs.write_text(full, content))
       Ok([rel, ..acc])
     }),
   )
@@ -139,7 +140,7 @@ fn scaffold_into_dir(
         <> "  export greet: func(name: string) -> string;\n"
         <> "}\n"
       let wit_dir = filepath.join(root, "wit")
-      use _ <- result.try(write_text(filepath.join(root, wit_rel), wit_src))
+      use _ <- result.try(fs.write_text(filepath.join(root, wit_rel), wit_src))
       use resolved <- result.try(wit_parser.load_wit_dir(wit_dir, None))
       use report <- result.try(gleam_gen.generate_project_bindings(
         resolved,
@@ -205,21 +206,4 @@ fn is_digit(c: String) -> Bool {
     }
     _ -> False
   }
-}
-
-fn write_text(path: String, contents: String) -> Result(Nil, String) {
-  let dir = filepath.directory_name(path)
-  use _ <- result.try(
-    simplifile.create_directory_all(dir)
-    |> result.map_error(fn(err) {
-      "Failed to create directory '"
-      <> dir
-      <> "': "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  simplifile.write(to: path, contents:)
-  |> result.map_error(fn(err) {
-    "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
-  })
 }

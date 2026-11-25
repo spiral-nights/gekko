@@ -1,4 +1,3 @@
-import common/fs
 import filepath
 import gleam/dict.{type Dict}
 import gleam/int
@@ -7,6 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import project/fs
 import project/text_edit
 import simplifile
 

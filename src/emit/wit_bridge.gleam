@@ -9,6 +9,7 @@ import gleam/set.{type Set}
 import gleam/string
 import lower/mangle
 import project/cmd
+import project/fs
 import project/workspace
 import simplifile
 import wit/ast.{
@@ -378,8 +379,11 @@ fn emit_iface_import_adapter(
   let moon_pkg = pkg_config.render_moon_pkg(final_state.pkg_imports, None)
 
   let dir = filepath.join(out_dir, adapter_pkg)
-  use _ <- result.try(write_file(filepath.join(dir, "moon.pkg"), moon_pkg))
-  write_file(filepath.join(dir, adapter_pkg <> ".mbt"), mbt_src)
+  use _ <- result.try(fs.write_text_if_changed(
+    filepath.join(dir, "moon.pkg"),
+    moon_pkg,
+  ))
+  fs.write_text_if_changed(filepath.join(dir, adapter_pkg <> ".mbt"), mbt_src)
 }
 
 fn emit_resource_import_wrappers(
@@ -506,8 +510,11 @@ fn emit_world_import_adapter(
   let moon_pkg = pkg_config.render_moon_pkg(final_state.pkg_imports, None)
 
   let dir = filepath.join(out_dir, adapter_pkg)
-  use _ <- result.try(write_file(filepath.join(dir, "moon.pkg"), moon_pkg))
-  write_file(filepath.join(dir, adapter_pkg <> ".mbt"), mbt_src)
+  use _ <- result.try(fs.write_text_if_changed(
+    filepath.join(dir, "moon.pkg"),
+    moon_pkg,
+  ))
+  fs.write_text_if_changed(filepath.join(dir, adapter_pkg <> ".mbt"), mbt_src)
 }
 
 fn emit_import_wrapper_fn(
@@ -636,8 +643,8 @@ fn emit_iface_export_stub(
   let moon_pkg =
     pkg_config.render_moon_pkg(final_state.pkg_imports, warnings_line)
 
-  use _ <- result.try(write_file(pkg_file, moon_pkg))
-  write_file(filepath.join(pkg_dir, "stub.mbt"), stub_src)
+  use _ <- result.try(fs.write_text_if_changed(pkg_file, moon_pkg))
+  fs.write_text_if_changed(filepath.join(pkg_dir, "stub.mbt"), stub_src)
 }
 
 fn emit_world_export_stub(
@@ -699,8 +706,8 @@ fn emit_world_export_stub(
   let moon_pkg =
     pkg_config.render_moon_pkg(final_state.pkg_imports, warnings_line)
 
-  use _ <- result.try(write_file(pkg_file, moon_pkg))
-  write_file(filepath.join(pkg_dir, "stub.mbt"), stub_src)
+  use _ <- result.try(fs.write_text_if_changed(pkg_file, moon_pkg))
+  fs.write_text_if_changed(filepath.join(pkg_dir, "stub.mbt"), stub_src)
 }
 
 fn emit_export_stub_fn(
@@ -1710,26 +1717,4 @@ fn extract_raw_prefixes_from_imports(
       _ -> acc
     }
   })
-}
-
-fn write_file(path: String, contents: String) -> Result(Nil, String) {
-  case simplifile.read(from: path) {
-    Ok(existing) if existing == contents -> Ok(Nil)
-    _ -> {
-      let dir = filepath.directory_name(path)
-      use _ <- result.try(
-        simplifile.create_directory_all(dir)
-        |> result.map_error(fn(err) {
-          "Failed to create directory '"
-          <> dir
-          <> "': "
-          <> simplifile.describe_error(err)
-        }),
-      )
-      simplifile.write(to: path, contents:)
-      |> result.map_error(fn(err) {
-        "Failed to write '" <> path <> "': " <> simplifile.describe_error(err)
-      })
-    }
-  }
 }

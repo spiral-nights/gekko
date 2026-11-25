@@ -1,4 +1,3 @@
-import common/fs
 import emit/prelude_runtime
 import filepath
 import gleam/dict.{type Dict}
@@ -9,6 +8,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import moonbit/syntax
+import project/fs
 import simplifile
 
 /// Trait implementations and `Eq`-required `Hash` parameter indices

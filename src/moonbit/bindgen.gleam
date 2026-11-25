@@ -24,6 +24,7 @@ import moonbit/mbti.{
 }
 import project/cmd
 import project/ffi_config
+import project/fs
 import project/loader
 import project/workspace
 import simplifile
@@ -200,16 +201,16 @@ pub fn bind_package(
 
   let gleam_dest =
     filepath.join(project_root, "src/" <> res.gleam_module_path <> ".gleam")
-  use _ <- result.try(write_with_parents(gleam_dest, res.gleam_source))
+  use _ <- result.try(fs.write_text(gleam_dest, res.gleam_source))
 
   case res.adapter_pkg_dir, res.adapter_mbt_source, res.adapter_moon_pkg {
     Some(dir), Some(mbt_src), Some(pkg_cfg) -> {
       let adapter_dir = filepath.join(project_root, "moonbit/" <> dir)
-      use _ <- result.try(write_with_parents(
+      use _ <- result.try(fs.write_text(
         filepath.join(adapter_dir, dir <> ".mbt"),
         mbt_src,
       ))
-      use _ <- result.try(write_with_parents(
+      use _ <- result.try(fs.write_text(
         filepath.join(adapter_dir, "moon.pkg"),
         pkg_cfg,
       ))
@@ -1068,22 +1069,5 @@ fn read_file_err(path: String) -> Result(String, String) {
   simplifile.read(from: path)
   |> result.map_error(fn(err) {
     "Failed to read " <> path <> ": " <> simplifile.describe_error(err)
-  })
-}
-
-fn write_with_parents(path: String, contents: String) -> Result(Nil, String) {
-  let dir = filepath.directory_name(path)
-  use _ <- result.try(
-    simplifile.create_directory_all(dir)
-    |> result.map_error(fn(err) {
-      "Failed to create directory "
-      <> dir
-      <> ": "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  simplifile.write(to: path, contents:)
-  |> result.map_error(fn(err) {
-    "Failed to write " <> path <> ": " <> simplifile.describe_error(err)
   })
 }

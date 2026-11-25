@@ -5,6 +5,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/fs
+import project/paths
 import simplifile
 
 /// Discover, validate, and copy local MoonBit FFI packages from
@@ -175,7 +176,7 @@ fn visit_package_dir(
             _ ->
               case simplifile.is_file(full) {
                 Ok(True) -> {
-                  let resolved = simplifile.resolve(full) |> result.unwrap(full)
+                  let resolved = paths.absolute(full)
                   case set.contains(excluded_files, resolved) {
                     True -> parts
                     False -> #([entry, ..files_acc], dirs_acc)

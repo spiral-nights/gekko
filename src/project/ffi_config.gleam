@@ -8,6 +8,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/patch_discovery
+import project/paths
 import project/prepass.{
   type ExternalType, type FfiKind, type TargetBranch, ExternalType, PackageCall,
   Patched, PreferErlang, PreferJavascript, WasmImport,
@@ -1432,19 +1433,13 @@ fn resolve_module_patch_files(
   pkg_name: String,
   patches: Dict(String, ModulePatch),
 ) -> Result(Dict(String, ModulePatch), String) {
-  let abs_root = simplifile.resolve(pkg_root) |> result.unwrap(pkg_root)
+  let abs_root = paths.absolute(pkg_root)
   dict.to_list(patches)
   |> list.try_fold(dict.new(), fn(acc, entry) {
     let #(mod_key, patch) = entry
     use resolved_files <- result.try(
       list.try_map(patch.files, fn(f) {
-        let joined = case filepath.is_absolute(f.source_path) {
-          True -> f.source_path
-          False -> filepath.join(abs_root, f.source_path)
-        }
-        let normalized =
-          simplifile.resolve(joined)
-          |> result.unwrap(filepath.expand(joined) |> result.unwrap(joined))
+        let normalized = paths.resolve_against(abs_root, f.source_path)
         case simplifile.is_file(normalized) {
           Ok(True) ->
             Ok(ModulePatchFile(

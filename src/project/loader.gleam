@@ -10,6 +10,7 @@ import gleam/string
 import index/symbol_table
 import project/cmd
 import project/interface.{type PackageInterface}
+import project/paths
 import project/prepass.{type FfiKind, type PrepassResult, type TargetBranch}
 import project/staging
 import project/text_edit
@@ -214,7 +215,7 @@ fn discover_local_path_packages(
       read_local_packages_from_manifest(manifest_path, project_root, root_name)
     _ -> Ok([])
   })
-  let abs_root = simplifile.resolve(project_root) |> result.unwrap(project_root)
+  let abs_root = paths.absolute(project_root)
   use from_toml <- result.try(collect_gleam_toml_path_deps(
     [project_root],
     root_name,
@@ -266,7 +267,8 @@ fn read_local_packages_from_manifest(
                   case name == root_name || is_intercepted_package(name) {
                     True -> Error(Nil)
                     False -> {
-                      let pkg_root = resolve_dep_path(project_root, rel_or_abs)
+                      let pkg_root =
+                        paths.resolve_against(project_root, rel_or_abs)
                       let version =
                         tom.get_string(tbl, ["version"])
                         |> result.unwrap("0.1.0")
@@ -309,7 +311,7 @@ fn collect_gleam_toml_path_deps(
   case queue {
     [] -> Ok(acc)
     [cur_root, ..rest] -> {
-      let norm_root = simplifile.resolve(cur_root) |> result.unwrap(cur_root)
+      let norm_root = paths.absolute(cur_root)
       case set.contains(visited_roots, norm_root) {
         True ->
           collect_gleam_toml_path_deps(
@@ -364,7 +366,7 @@ fn collect_gleam_toml_path_deps(
                             case tom.get_string(dep_tbl, ["path"]) {
                               Ok(rel_or_abs) -> {
                                 let pkg_root =
-                                  resolve_dep_path(norm_root, rel_or_abs)
+                                  paths.resolve_against(norm_root, rel_or_abs)
                                 let pkg_toml =
                                   filepath.join(pkg_root, "gleam.toml")
                                 case
@@ -432,15 +434,6 @@ fn use_pkg(
       }
     Error(_) -> #(queue, acc)
   }
-}
-
-fn resolve_dep_path(base_root: String, rel_or_abs: String) -> String {
-  let abs_base = simplifile.resolve(base_root) |> result.unwrap(base_root)
-  let raw = case filepath.is_absolute(rel_or_abs) {
-    True -> rel_or_abs
-    False -> filepath.join(abs_base, rel_or_abs)
-  }
-  filepath.expand(raw) |> result.unwrap(raw)
 }
 
 fn discover_packages(

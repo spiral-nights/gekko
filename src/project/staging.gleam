@@ -15,7 +15,9 @@ import project/interface.{
   ResolvedFunction, ResolvedParam, ResolvedTypeAlias, ResolvedTypeDef,
   ResolvedVariant, ResolvedVariantField, TupleType, VariableType,
 }
+import project/paths
 import project/prepass
+
 import project/text_edit.{
   type TextEdit, TextEdit, apply_edits, skip_trivia, token_end,
 }
@@ -264,7 +266,7 @@ pub fn extract_package_interface_with_packages_hash(
   staging_dir: String,
   packages_hash: Option(String),
 ) -> Result(PackageInterface, String) {
-  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
+  let is_root_pkg = paths.absolute(pkg_root) == paths.absolute(deps_root)
   extract_package_interface_impl(
     pkg_root,
     deps_root,
@@ -291,7 +293,7 @@ fn extract_package_interface_impl(
   include_tests: Bool,
   precomputed_packages_hash: Option(String),
 ) -> Result(PackageInterface, String) {
-  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
+  let is_root_pkg = paths.absolute(pkg_root) == paths.absolute(deps_root)
   let hash_path = filepath.join(staging_dir, ".gekko_iface_hash")
   let test_mods_path = filepath.join(staging_dir, ".gekko_test_mods")
   let json_path = filepath.join(staging_dir, "interface.json")
@@ -393,7 +395,7 @@ fn compute_staging_fingerprint(
   include_tests: Bool,
   precomputed_packages_hash: Option(String),
 ) -> Result(String, String) {
-  let is_root_pkg = resolve_abs_dir(pkg_root) == resolve_abs_dir(deps_root)
+  let is_root_pkg = paths.absolute(pkg_root) == paths.absolute(deps_root)
   let inc_flag = case include_tests {
     True -> "1"
     False -> "0"
@@ -544,8 +546,8 @@ fn stage_toml_and_deps(
   staging_dir: String,
   include_tests: Bool,
 ) -> Result(Nil, String) {
-  let abs_pkg = resolve_abs_dir(pkg_root)
-  let abs_deps = resolve_abs_dir(deps_root)
+  let abs_pkg = paths.absolute(pkg_root)
+  let abs_deps = paths.absolute(deps_root)
   let is_dep_staging = abs_pkg != abs_deps
 
   let packages_rel = filepath.join("build", "packages")
@@ -660,22 +662,10 @@ fn stage_toml_and_deps(
   }
 }
 
-fn resolve_abs_dir(dir: String) -> String {
-  simplifile.resolve(dir) |> result.unwrap(dir)
-}
-
-fn resolve_relative_against(base_dir: String, rel_or_abs: String) -> String {
-  let raw = case filepath.is_absolute(rel_or_abs) {
-    True -> rel_or_abs
-    False -> filepath.join(base_dir, rel_or_abs)
-  }
-  filepath.expand(raw) |> result.unwrap(raw)
-}
-
 fn collect_staged_package_paths(
   dest_packages: String,
 ) -> Result(Dict(String, String), String) {
-  let abs_dest = resolve_abs_dir(dest_packages)
+  let abs_dest = paths.absolute(dest_packages)
   use entries <- result.try(
     simplifile.read_directory(at: dest_packages)
     |> result.map_error(fn(err) {
@@ -718,7 +708,7 @@ fn collect_root_local_dep_paths(abs_deps: String) -> Dict(String, String) {
                         dict.insert(
                           acc,
                           name,
-                          resolve_relative_against(abs_deps, rel),
+                          paths.resolve_against(abs_deps, rel),
                         )
                       _, _, _ -> acc
                     }
@@ -745,7 +735,7 @@ fn collect_root_local_dep_paths(abs_deps: String) -> Dict(String, String) {
                         dict.insert(
                           acc,
                           name,
-                          resolve_relative_against(abs_deps, rel),
+                          paths.resolve_against(abs_deps, rel),
                         )
                       Error(_) -> acc
                     }
@@ -922,7 +912,7 @@ fn scan_toml_chars(
             True -> raw_full
             False ->
               "\""
-              <> escape_toml_str(resolve_relative_against(base_dir, raw_inner))
+              <> escape_toml_str(paths.resolve_against(base_dir, raw_inner))
               <> "\""
           }
         False -> raw_full
@@ -1034,8 +1024,7 @@ fn copy_packages_isolated(
   list.try_each(entries, fn(entry) {
     let src_entry = filepath.join(src_packages, entry)
     let dest_entry = filepath.join(dest_packages, entry)
-    let resolved =
-      simplifile.resolve(path: src_entry) |> result.unwrap(src_entry)
+    let resolved = paths.absolute(src_entry)
     case simplifile.is_directory(resolved) {
       Ok(True) -> copy_package_dir_filtered(resolved, dest_entry)
       Ok(False) ->
@@ -1089,8 +1078,7 @@ fn copy_package_dir_filtered(
       _ -> {
         let src_path = filepath.join(src_dir, entry)
         let dest_path = filepath.join(dest_dir, entry)
-        let resolved =
-          simplifile.resolve(path: src_path) |> result.unwrap(src_path)
+        let resolved = paths.absolute(src_path)
         case simplifile.is_directory(resolved) {
           Ok(True) ->
             simplifile.copy_directory(at: resolved, to: dest_path)

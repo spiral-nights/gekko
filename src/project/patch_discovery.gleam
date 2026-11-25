@@ -7,6 +7,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/fs
+import project/paths
 import project/text_edit
 import simplifile
 
@@ -786,7 +787,7 @@ fn discover_pkg_dir_patch(
     list.try_fold(mbt_files, #([], [], True), fn(state, file) {
       let #(f_acc, a_acc, toml_ok) = state
       let full = filepath.join(dir, file)
-      let canon = canonical_path(full)
+      let canon = paths.absolute(full)
       use src <- result.try(
         simplifile.read(canon)
         |> result.map_error(fn(err) {
@@ -874,7 +875,7 @@ fn discover_single_file_patch(
   toml_patched_paths: Set(String),
   acc: Dict(String, DiscoveredModulePatch),
 ) -> Result(Dict(String, DiscoveredModulePatch), String) {
-  let canon = canonical_path(file_path)
+  let canon = paths.absolute(file_path)
   use src <- result.try(
     simplifile.read(canon)
     |> result.map_error(fn(err) {
@@ -1075,11 +1076,6 @@ fn dedup(items: List(a)) -> List(a) {
       }
     })
   list.reverse(rev)
-}
-
-fn canonical_path(path: String) -> String {
-  simplifile.resolve(path)
-  |> result.unwrap(filepath.expand(path) |> result.unwrap(path))
 }
 
 // -----------------------------------------------------------------------------

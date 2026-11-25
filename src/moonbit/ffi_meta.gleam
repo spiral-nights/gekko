@@ -9,6 +9,7 @@ import gleam/set.{type Set}
 import gleam/string
 import moonbit/syntax
 import project/fs
+import project/paths
 import simplifile
 
 /// Trait implementations and `Eq`-required `Hash` parameter indices
@@ -174,8 +175,7 @@ fn visit_pkg_dir(
                     && !string.ends_with(entry, "_wbtest.mbt")
                   {
                     True -> {
-                      let resolved =
-                        simplifile.resolve(full) |> result.unwrap(full)
+                      let resolved = paths.absolute(full)
                       case set.contains(excluded_files, resolved) {
                         True -> parts
                         False -> #([full, ..files_acc], dirs_acc)

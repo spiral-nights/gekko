@@ -4,6 +4,7 @@ import gleam/option.{None}
 import gleam/result
 import gleam/string
 import project/fs
+import project/paths
 import simplifile
 import wit/gleam_gen
 import wit/parser as wit_parser
@@ -61,7 +62,7 @@ pub fn init_project(
   case simplifile.is_file(toml_path) {
     Ok(True) -> Error("Refusing to overwrite existing " <> toml_path)
     _ -> {
-      let abs = simplifile.resolve(root) |> result.unwrap(root)
+      let abs = paths.absolute(root)
       let base = filepath.base_name(abs)
       let name = case validate_project_name(base) {
         Ok(n) -> n

@@ -477,10 +477,14 @@ pub fn mbti_parser_stdlib_math_and_buffer_test() {
     <> "pub(all) enum Mode {\n  Fast\n  Exact(Int32)\n}\n\n"
     <> "pub fn summarize(Array[Int32], scale? : Int32) -> Summary\n"
     <> "pub fn[T : Show] debug_str(T) -> String\n"
+    <> "pub type Wrapped[F : (Int32, Int32) -> Unit]\n"
   let assert Ok(parsed_inline) = mbti.parse_mbti(inline_mbti)
   assert parsed_inline.package_name == "demo/sample"
-  assert list.length(parsed_inline.types) == 3
+  assert list.length(parsed_inline.types) == 4
   assert list.length(parsed_inline.functions) == 2
+  assert list.any(parsed_inline.types, fn(t) {
+    t.name == "Wrapped" && t.type_params == ["F : (Int32, Int32) -> Unit"]
+  })
   Nil
 }
 

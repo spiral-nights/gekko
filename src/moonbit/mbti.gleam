@@ -798,12 +798,7 @@ fn split_name_and_type_params(
     True ->
       case syntax.take_balanced_brackets(after_trim) {
         Ok(#(inner, rem)) -> {
-          let tps =
-            inner
-            |> string.split(",")
-            |> list.map(string.trim)
-            |> list.filter(fn(x) { x != "" })
-          #(name, tps, rem)
+          #(name, syntax.split_top_level_commas(inner), rem)
         }
         Error(_) -> #(name, [], after_name)
       }

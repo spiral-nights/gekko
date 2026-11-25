@@ -264,7 +264,7 @@ fn is_external_named_type(module: String, name: String, ctx: EmitCtx) -> Bool {
   }
 }
 
-pub fn lookup_external_type(
+fn lookup_external_type(
   module: String,
   name: String,
   ctx: EmitCtx,

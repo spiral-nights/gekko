@@ -5,7 +5,7 @@ import gleam/string
 
 /// Extract a balanced delimiter-enclosed block starting at the beginning of `src`
 /// (e.g. `(...)` or `[...]`), returning `#(inner_content, remaining_suffix)`.
-pub fn take_balanced(
+fn take_balanced(
   src: String,
   open: String,
   close: String,

@@ -7,7 +7,7 @@ import gleam/string
 import glexer
 import glexer/token.{type Token}
 import project/text_edit.{
-  type TextEdit, TextEdit, apply_edits, skip_trivia,
+  type TextEdit, TextEdit, apply_edits, byte_offset_to_line, skip_trivia,
   stripped_comment_preserving_lines, token_end,
 }
 
@@ -175,7 +175,7 @@ fn scan_tokens(
 
     // Doc comment at top level: check for `/// @external(...)` or `/// @external_type(...)`
     [#(token.CommentDoc(doc_text), pos), ..rest] if brace_depth == 0 -> {
-      let line = line_at_offset(source, pos.byte_offset)
+      let line = byte_offset_to_line(source, pos.byte_offset)
       let pending_fns = case parse_doc_pragma(doc_text) {
         Some(kind) -> [
           PendingFfi(kind:, source: DocPragma, line:),
@@ -208,7 +208,7 @@ fn scan_tokens(
       case match_raw_external_moonbit(after_at) {
         Some(#(kind, end_offset, remaining)) -> {
           let start_offset = pos.byte_offset
-          let line = line_at_offset(source, start_offset)
+          let line = byte_offset_to_line(source, start_offset)
           let replacement =
             stripped_comment_preserving_lines(
               source,
@@ -238,7 +238,7 @@ fn scan_tokens(
           case match_raw_external_type_moonbit(after_at) {
             Some(#(target, end_offset, remaining)) -> {
               let start_offset = pos.byte_offset
-              let line = line_at_offset(source, start_offset)
+              let line = byte_offset_to_line(source, start_offset)
               let replacement =
                 stripped_comment_preserving_lines(
                   source,
@@ -816,8 +816,4 @@ fn skip_type(
 
     _ -> None
   }
-}
-
-fn line_at_offset(source: String, offset: Int) -> Int {
-  text_edit.byte_offset_to_line(source, offset)
 }

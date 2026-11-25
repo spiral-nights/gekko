@@ -7,6 +7,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/fs
+import project/moonbit_lex
 import project/paths
 import project/text_edit
 import simplifile
@@ -62,20 +63,10 @@ pub fn parse_moon_pkg_imports(
   content: String,
   source_pkg: String,
 ) -> Result(List(DiscoveredImport), String) {
-  let stripped = strip_line_comments(content)
-  use blocks <- result.try(
-    extract_import_blocks(
-      string.to_graphemes(stripped),
-      0,
-      False,
-      False,
-      "",
-      "",
-      False,
-      [],
-      [],
-    ),
-  )
+  use blocks <- result.try(moonbit_lex.extract_import_blocks(
+    content,
+    "moon.pkg",
+  ))
   use raw_imports <- result.try(
     list.try_fold(blocks, [], fn(acc, body) {
       let items =
@@ -413,7 +404,7 @@ fn parse_quoted_string(s: String) -> Result(String, Nil) {
 }
 
 fn strip_trailing_line_comment(s: String) -> String {
-  strip_comment_in_line(string.to_graphemes(s), False, False, [])
+  moonbit_lex.strip_line_comment(s)
   |> string.trim
 }
 
@@ -1122,264 +1113,6 @@ fn step_code_chars(
   }
 }
 
-fn strip_line_comments(content: String) -> String {
-  content
-  |> string.split("\n")
-  |> list.map(fn(line) {
-    strip_comment_in_line(string.to_graphemes(line), False, False, [])
-  })
-  |> string.join("\n")
-}
-
-fn strip_comment_in_line(
-  chars: List(String),
-  in_string: Bool,
-  escaped: Bool,
-  acc: List(String),
-) -> String {
-  case chars {
-    [] -> acc |> list.reverse |> string.concat
-    [ch, ..rest] ->
-      case in_string {
-        True ->
-          case escaped {
-            True -> strip_comment_in_line(rest, True, False, [ch, ..acc])
-            False ->
-              case ch {
-                "\\" -> strip_comment_in_line(rest, True, True, [ch, ..acc])
-                "\"" -> strip_comment_in_line(rest, False, False, [ch, ..acc])
-                _ -> strip_comment_in_line(rest, True, False, [ch, ..acc])
-              }
-          }
-        False ->
-          case ch, rest {
-            "\"", _ -> strip_comment_in_line(rest, True, False, [ch, ..acc])
-            "/", ["/", ..] -> acc |> list.reverse |> string.concat
-            _, _ -> strip_comment_in_line(rest, False, False, [ch, ..acc])
-          }
-      }
-  }
-}
-
-fn extract_import_blocks(
-  chars: List(String),
-  depth: Int,
-  in_string: Bool,
-  escaped: Bool,
-  current_ident: String,
-  prev_ident: String,
-  capturing: Bool,
-  captured_rev: List(String),
-  blocks_rev: List(String),
-) -> Result(List(String), String) {
-  case chars {
-    [] ->
-      case capturing {
-        True -> Error("Unclosed import block in moon.pkg")
-        False -> Ok(list.reverse(blocks_rev))
-      }
-    [ch, ..rest] ->
-      case in_string {
-        True -> {
-          let next_captured = case capturing {
-            True -> [ch, ..captured_rev]
-            False -> captured_rev
-          }
-          let #(next_in_str, next_esc) = case escaped {
-            True -> #(True, False)
-            False ->
-              case ch {
-                "\\" -> #(True, True)
-                "\"" -> #(False, False)
-                _ -> #(True, False)
-              }
-          }
-          extract_import_blocks(
-            rest,
-            depth,
-            next_in_str,
-            next_esc,
-            "",
-            "",
-            capturing,
-            next_captured,
-            blocks_rev,
-          )
-        }
-        False ->
-          case depth {
-            0 ->
-              case ch {
-                "\"" ->
-                  extract_import_blocks(
-                    rest,
-                    0,
-                    True,
-                    False,
-                    "",
-                    "",
-                    False,
-                    [],
-                    blocks_rev,
-                  )
-                "{" -> {
-                  let keyword = case current_ident {
-                    "" -> prev_ident
-                    _ -> current_ident
-                  }
-                  let start_capture = keyword == "import"
-                  extract_import_blocks(
-                    rest,
-                    1,
-                    False,
-                    False,
-                    "",
-                    "",
-                    start_capture,
-                    [],
-                    blocks_rev,
-                  )
-                }
-                _ ->
-                  case is_ident_char(ch), is_whitespace_char(ch) {
-                    True, _ ->
-                      extract_import_blocks(
-                        rest,
-                        0,
-                        False,
-                        False,
-                        current_ident <> ch,
-                        prev_ident,
-                        False,
-                        [],
-                        blocks_rev,
-                      )
-                    False, True -> {
-                      let next_prev = case current_ident {
-                        "" -> prev_ident
-                        _ -> current_ident
-                      }
-                      extract_import_blocks(
-                        rest,
-                        0,
-                        False,
-                        False,
-                        "",
-                        next_prev,
-                        False,
-                        [],
-                        blocks_rev,
-                      )
-                    }
-                    False, False ->
-                      extract_import_blocks(
-                        rest,
-                        0,
-                        False,
-                        False,
-                        "",
-                        "",
-                        False,
-                        [],
-                        blocks_rev,
-                      )
-                  }
-              }
-            _ ->
-              case ch {
-                "\"" -> {
-                  let next_captured = case capturing {
-                    True -> [ch, ..captured_rev]
-                    False -> captured_rev
-                  }
-                  extract_import_blocks(
-                    rest,
-                    depth,
-                    True,
-                    False,
-                    "",
-                    "",
-                    capturing,
-                    next_captured,
-                    blocks_rev,
-                  )
-                }
-                "{" -> {
-                  let next_captured = case capturing {
-                    True -> [ch, ..captured_rev]
-                    False -> captured_rev
-                  }
-                  extract_import_blocks(
-                    rest,
-                    depth + 1,
-                    False,
-                    False,
-                    "",
-                    "",
-                    capturing,
-                    next_captured,
-                    blocks_rev,
-                  )
-                }
-                "}" -> {
-                  let next_depth = depth - 1
-                  case next_depth == 0 && capturing {
-                    True -> {
-                      let body = captured_rev |> list.reverse |> string.concat
-                      extract_import_blocks(
-                        rest,
-                        0,
-                        False,
-                        False,
-                        "",
-                        "",
-                        False,
-                        [],
-                        [body, ..blocks_rev],
-                      )
-                    }
-                    False -> {
-                      let next_captured = case capturing {
-                        True -> [ch, ..captured_rev]
-                        False -> captured_rev
-                      }
-                      extract_import_blocks(
-                        rest,
-                        next_depth,
-                        False,
-                        False,
-                        "",
-                        "",
-                        capturing,
-                        next_captured,
-                        blocks_rev,
-                      )
-                    }
-                  }
-                }
-                _ -> {
-                  let next_captured = case capturing {
-                    True -> [ch, ..captured_rev]
-                    False -> captured_rev
-                  }
-                  extract_import_blocks(
-                    rest,
-                    depth,
-                    False,
-                    False,
-                    "",
-                    "",
-                    capturing,
-                    next_captured,
-                    blocks_rev,
-                  )
-                }
-              }
-          }
-      }
-  }
-}
-
 fn read_ident(s: String) -> #(String, String) {
   read_ident_loop(string.to_graphemes(s), [])
 }
@@ -1390,7 +1123,7 @@ fn read_ident_loop(
 ) -> #(String, String) {
   case chars {
     [ch, ..rest] ->
-      case is_ident_char(ch) {
+      case moonbit_lex.is_ident_char(ch) {
         True -> read_ident_loop(rest, [ch, ..rev_acc])
         False -> #(
           rev_acc |> list.reverse |> string.concat,
@@ -1402,33 +1135,5 @@ fn read_ident_loop(
 }
 
 fn is_valid_ident(s: String) -> Bool {
-  s != "" && list.all(string.to_graphemes(s), is_ident_char)
-}
-
-fn is_ident_char(ch: String) -> Bool {
-  case ch {
-    "_" -> True
-    _ -> {
-      let lower = string.lowercase(ch)
-      let upper = string.uppercase(ch)
-      lower != upper
-      || ch == "0"
-      || ch == "1"
-      || ch == "2"
-      || ch == "3"
-      || ch == "4"
-      || ch == "5"
-      || ch == "6"
-      || ch == "7"
-      || ch == "8"
-      || ch == "9"
-    }
-  }
-}
-
-fn is_whitespace_char(ch: String) -> Bool {
-  case ch {
-    " " | "\t" | "\n" | "\r" -> True
-    _ -> False
-  }
+  s != "" && list.all(string.to_graphemes(s), moonbit_lex.is_ident_char)
 }

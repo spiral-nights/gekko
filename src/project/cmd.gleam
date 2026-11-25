@@ -27,8 +27,12 @@ pub const min_moon_version = #(0, 1, 20_261_104)
 
 pub const min_moonc_version = #(0, 10, 20)
 
-/// MoonBit toolchain versions gekko's test suite verifies against. Keep in sync
+/// MoonBit toolchain release gekko's test suite verifies against, in the format
+/// accepted by the official installer (e.g. `0.10.22+124d61d05`). Keep in sync
 /// with `.moonbit-version` (enforced by `pinned_moonbit_version_matches_disk_file_test`).
+pub const pinned_moonbit_release = "0.10.22+124d61d05"
+
+/// Parsed forms of the pinned release, reported by `moon --version` and `moonc -v`.
 pub const pinned_moon_version = #(0, 1, 20_261_119)
 
 pub const pinned_moonc_version = #(0, 10, 22)

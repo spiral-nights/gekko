@@ -1,5 +1,8 @@
-# MoonBit toolchain versions verified by gekko's test suite.
-# Keep in sync with pinned_moon_version / pinned_moonc_version in
-# src/project/cmd.gleam (enforced by a test).
+# MoonBit toolchain release pinned by gekko's test suite.
+# This is the release identifier accepted by the official installer, e.g.
+#   curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s 0.10.22+124d61d05
+# `moonbit` must match pinned_moonbit_release, `moon` pinned_moon_version, and
+# `moonc` pinned_moonc_version in src/project/cmd.gleam (enforced by a test).
+moonbit=0.10.22+124d61d05
 moon=0.1.20261119
 moonc=0.10.22

@@ -1026,6 +1026,7 @@ pub fn staging_interface_cache_hit_and_invalidation_test() {
 
 pub fn pinned_moonbit_version_matches_disk_file_test() {
   let assert Ok(contents) = simplifile.read(".moonbit-version")
+  assert string.contains(contents, "moonbit=" <> cmd.pinned_moonbit_release)
   assert string.contains(
     contents,
     "moon=" <> cmd.version_to_string(cmd.pinned_moon_version),

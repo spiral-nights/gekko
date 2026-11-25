@@ -47,7 +47,7 @@ flowchart TD
 
 **Prerequisites:**
 - **[Gleam](https://gleam.run)** `1.19.x` (verified with `1.19.2`) and Erlang/OTP (27/28) on your `PATH`
-- **[MoonBit](https://www.moonbitlang.com/)** (`moon >= 0.1.20261104` / `moonc >= 0.10.20`; verified with `moon 0.1.20261119` / `moonc v0.10.22`, pinned in [`.moonbit-version`](./.moonbit-version); required for the `moon.mod` / `moon.pkg` manifest format that `gekko` emits)
+- **[MoonBit](https://www.moonbitlang.com/)** (`moon >= 0.1.20261104` / `moonc >= 0.10.20`; verified with release `0.10.22+124d61d05` (`moon 0.1.20261119` / `moonc v0.10.22`), pinned in [`.moonbit-version`](./.moonbit-version); required for the `moon.mod` / `moon.pkg` manifest format that `gekko` emits)
 - **`wasm-tools` and `wit-bindgen`** (`wit-bindgen-cli`) — needed only for WebAssembly Component (`gekko wit`) commands
 
 ```bash
@@ -268,7 +268,7 @@ gleam test
 
 - If you edit `runtime/prelude/gprelude.mbt` or `runtime/prelude/moon.pkg`, run `./scripts/sync_prelude.sh` so `src/emit/prelude_runtime.gleam` stays byte-identical.
 - To run the full downstream regression suite across `gekko_stdlib`, `gekko_json`, and `gekko_examples`, run `./scripts/test_ecosystem.sh`.
-- CI installs the MoonBit toolchain pinned in `.moonbit-version`. When bumping the verified version, update both `.moonbit-version` and `pinned_moon_version` / `pinned_moonc_version` in `src/project/cmd.gleam` (a test enforces they match). A separate scheduled `moonbit-latest` CI job runs against the newest MoonBit release to surface breaking changes early.
+- CI installs the MoonBit toolchain pinned in `.moonbit-version`. When bumping the verified version, update `.moonbit-version` and `pinned_moonbit_release` / `pinned_moon_version` / `pinned_moonc_version` in `src/project/cmd.gleam` (a test enforces they match). A separate scheduled `moonbit-latest` CI job runs against the newest MoonBit release to surface breaking changes early.
 
 ## AI Usage
 

@@ -9,6 +9,7 @@ import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table
 import project/cmd
+import project/ffi_config
 import project/interface.{type PackageInterface}
 import project/paths
 import project/prepass.{type FfiKind, type PrepassResult, type TargetBranch}
@@ -36,6 +37,115 @@ pub type DiscoveredPkg {
     package_root: String,
     deps: List(String),
   )
+}
+
+/// Everything the compiler learns about a project before lowering modules.
+pub type ProjectContext {
+  ProjectContext(
+    project_name: String,
+    version: String,
+    packages_hash: String,
+    dependencies: List(DiscoveredPkg),
+    overlays: ffi_config.MergedOverlays,
+  )
+}
+
+/// Read project metadata, fetch missing dependencies, discover packages, and
+/// merge every package overlay into the configuration the compiler needs.
+pub fn load_project_context(
+  project_root: String,
+  include_tests: Bool,
+) -> Result(ProjectContext, String) {
+  use #(project_name, version) <- result.try(read_project_meta(project_root))
+  use _ <- result.try(ensure_deps_downloaded(project_root, include_tests))
+  use packages_hash <- result.try(staging.compute_packages_dir_hash(
+    project_root,
+  ))
+  use dependencies <- result.try(discover_all_dependencies(
+    project_root,
+    include_tests,
+  ))
+  use dep_overlays <- result.try(
+    list.try_map(dependencies, fn(dep) {
+      ffi_config.load_package_overlay(dep.package_root, dep.package_name)
+    }),
+  )
+  use root_overlay <- result.try(ffi_config.load_package_overlay(
+    project_root,
+    project_name,
+  ))
+  use overlays <- result.try(ffi_config.merge_overlays(
+    dep_overlays,
+    root_overlay,
+  ))
+  Ok(ProjectContext(
+    project_name:,
+    version:,
+    packages_hash:,
+    dependencies:,
+    overlays:,
+  ))
+}
+
+fn ensure_deps_downloaded(
+  project_root: String,
+  include_tests: Bool,
+) -> Result(Nil, String) {
+  let packages_dir = filepath.join(project_root, "build/packages")
+  case simplifile.is_directory(packages_dir) {
+    Ok(True) -> Ok(Nil)
+    _ -> {
+      let toml_path = filepath.join(project_root, "gleam.toml")
+      case simplifile.read(toml_path) {
+        Error(_) -> Ok(Nil)
+        Ok(content) ->
+          case tom.parse(content) {
+            Error(_) -> Ok(Nil)
+            Ok(parsed) -> {
+              let has_remote_in = fn(section) {
+                case tom.get_table(parsed, [section]) {
+                  Error(_) -> False
+                  Ok(tbl) ->
+                    dict.values(tbl)
+                    |> list.any(fn(val) {
+                      case val {
+                        tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
+                          case tom.get_string(dep_tbl, ["path"]) {
+                            Ok(_) -> False
+                            Error(_) -> True
+                          }
+                        _ -> True
+                      }
+                    })
+                }
+              }
+              let needs_download =
+                has_remote_in("dependencies")
+                || { include_tests && has_remote_in("dev-dependencies") }
+              case needs_download {
+                False -> Ok(Nil)
+                True -> {
+                  let res =
+                    cmd.run(
+                      command: "gleam",
+                      args: ["deps", "download"],
+                      cwd: project_root,
+                    )
+                  case res.exit_code {
+                    0 -> Ok(Nil)
+                    _ ->
+                      Error(
+                        "`gleam deps download` failed while fetching missing dependencies:\n"
+                        <> res.output,
+                      )
+                  }
+                }
+              }
+            }
+          }
+      }
+    }
+  }
 }
 
 /// Return True if `pkg_name` is a target-specific test/runtime package that

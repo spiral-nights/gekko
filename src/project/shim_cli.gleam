@@ -15,7 +15,6 @@ import lower/desugar
 import lower/ir.{type IrFunction}
 import lower/mangle
 import moonbit/ffi_meta
-import project/ffi_config
 import project/fs
 import project/loader
 import project/staging
@@ -219,18 +218,14 @@ fn collect_inspect_data(
   project_root: String,
   target_pkg: String,
 ) -> Result(InspectData, String) {
-  use #(root_name, _) <- result.try(loader.read_project_meta(project_root))
-  use discovered_deps <- result.try(loader.discover_all_dependencies(
-    project_root,
-    True,
-  ))
+  use ctx <- result.try(loader.load_project_context(project_root, True))
   let target_opt =
-    list.find(discovered_deps, fn(d) { d.package_name == target_pkg })
+    list.find(ctx.dependencies, fn(d) { d.package_name == target_pkg })
   use pkg <- result.try(case target_opt {
     Ok(p) -> Ok(p)
     Error(_) -> {
       let available =
-        list.map(discovered_deps, fn(d) { d.package_name })
+        list.map(ctx.dependencies, fn(d) { d.package_name })
         |> string.join(", ")
       let suffix = case available {
         "" -> " (no dependencies found in build/packages)"
@@ -246,28 +241,14 @@ fn collect_inspect_data(
     }
   })
 
-  use dep_overlays <- result.try(
-    list.try_map(discovered_deps, fn(dep) {
-      ffi_config.load_package_overlay(dep.package_root, dep.package_name)
-    }),
-  )
-  use root_overlay <- result.try(ffi_config.load_package_overlay(
-    project_root,
-    root_name,
-  ))
-  use overlays <- result.try(ffi_config.merge_overlays(
-    dep_overlays,
-    root_overlay,
-  ))
+  let overlays = ctx.overlays
 
   let src_dir = filepath.join(pkg.package_root, "src")
   use modules <- result.try(case simplifile.is_directory(src_dir) {
     Ok(True) -> loader.discover_and_parse(src_dir, None)
     _ -> Ok([])
   })
-  use packages_hash <- result.try(staging.compute_packages_dir_hash(
-    project_root,
-  ))
+  let packages_hash = ctx.packages_hash
   let dep_staging =
     project_root
     |> filepath.join("build")
@@ -286,7 +267,7 @@ fn collect_inspect_data(
       #(pkg.package_name, mod_name, ast_mod, pre)
     })
   let ffi_roots =
-    list.append(list.map(discovered_deps, fn(d) { d.package_root }), [
+    list.append(list.map(ctx.dependencies, fn(d) { d.package_root }), [
       project_root,
     ])
   let ffi_metadata =

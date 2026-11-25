@@ -17,7 +17,6 @@ import lower/mangle
 import lower/tco
 import lower/validate
 import moonbit/ffi_meta
-import project/cmd
 import project/diagnostics
 import project/ffi_config
 import project/fs
@@ -27,7 +26,6 @@ import project/moonbit_ffi
 import project/prepass.{type PrepassResult}
 import project/staging
 import simplifile
-import tom
 
 /// Summary returned after transpiling a Gleam project into a MoonBit workspace.
 pub type TranspileSummary {
@@ -58,30 +56,12 @@ pub fn transpile_project_with_tests(
   out_dir: String,
   include_tests: Bool,
 ) -> Result(TranspileSummary, String) {
-  use #(project_name, version) <- result.try(loader.read_project_meta(
-    project_root,
-  ))
-  use _ <- result.try(ensure_deps_downloaded(project_root, include_tests))
-  use packages_hash <- result.try(staging.compute_packages_dir_hash(
-    project_root,
-  ))
-  use discovered_deps <- result.try(loader.discover_all_dependencies(
-    project_root,
-    include_tests,
-  ))
-  use dep_overlays <- result.try(
-    list.try_map(discovered_deps, fn(dep) {
-      ffi_config.load_package_overlay(dep.package_root, dep.package_name)
-    }),
-  )
-  use root_overlay <- result.try(ffi_config.load_package_overlay(
-    project_root,
-    project_name,
-  ))
-  use overlays <- result.try(ffi_config.merge_overlays(
-    dep_overlays,
-    root_overlay,
-  ))
+  use ctx <- result.try(loader.load_project_context(project_root, include_tests))
+  let project_name = ctx.project_name
+  let version = ctx.version
+  let packages_hash = ctx.packages_hash
+  let discovered_deps = ctx.dependencies
+  let overlays = ctx.overlays
   let discovered_versions =
     list.fold(
       discovered_deps,
@@ -525,67 +505,6 @@ fn calls_gleeunit_main(stmts: List(glance.Statement)) -> Bool {
       )),
     ] -> True
     _ -> False
-  }
-}
-
-fn ensure_deps_downloaded(
-  project_root: String,
-  include_tests: Bool,
-) -> Result(Nil, String) {
-  let packages_dir = filepath.join(project_root, "build/packages")
-  case simplifile.is_directory(packages_dir) {
-    Ok(True) -> Ok(Nil)
-    _ -> {
-      let toml_path = filepath.join(project_root, "gleam.toml")
-      case simplifile.read(toml_path) {
-        Error(_) -> Ok(Nil)
-        Ok(content) ->
-          case tom.parse(content) {
-            Error(_) -> Ok(Nil)
-            Ok(parsed) -> {
-              let has_remote_in = fn(section) {
-                case tom.get_table(parsed, [section]) {
-                  Error(_) -> False
-                  Ok(tbl) ->
-                    dict.values(tbl)
-                    |> list.any(fn(val) {
-                      case val {
-                        tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
-                          case tom.get_string(dep_tbl, ["path"]) {
-                            Ok(_) -> False
-                            Error(_) -> True
-                          }
-                        _ -> True
-                      }
-                    })
-                }
-              }
-              let needs_download =
-                has_remote_in("dependencies")
-                || { include_tests && has_remote_in("dev-dependencies") }
-              case needs_download {
-                False -> Ok(Nil)
-                True -> {
-                  let res =
-                    cmd.run(
-                      command: "gleam",
-                      args: ["deps", "download"],
-                      cwd: project_root,
-                    )
-                  case res.exit_code {
-                    0 -> Ok(Nil)
-                    _ ->
-                      Error(
-                        "`gleam deps download` failed while fetching missing dependencies:\n"
-                        <> res.output,
-                      )
-                  }
-                }
-              }
-            }
-          }
-      }
-    }
   }
 }
 

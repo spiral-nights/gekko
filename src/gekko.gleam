@@ -775,9 +775,10 @@ fn run_clean(root: String) -> Nil {
 fn run_doctor_cmd() -> Nil {
   let statuses = cmd.run_doctor()
   list.each(statuses, fn(st) {
-    let icon = case st.ok {
-      True -> "OK  "
-      False -> "FAIL"
+    let icon = case st.ok, st.warning {
+      False, _ -> "FAIL"
+      True, True -> "WARN"
+      True, False -> "OK  "
     }
     let req_tag = case st.required {
       True -> "required"

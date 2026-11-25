@@ -18,6 +18,7 @@ pub type ToolStatus {
     found: Bool,
     version: Option(String),
     ok: Bool,
+    warning: Bool,
     note: String,
   )
 }
@@ -25,6 +26,12 @@ pub type ToolStatus {
 pub const min_moon_version = #(0, 1, 20_261_104)
 
 pub const min_moonc_version = #(0, 10, 20)
+
+/// MoonBit toolchain versions gekko's test suite verifies against. Keep in sync
+/// with `.moonbit-version` (enforced by `pinned_moonbit_version_matches_disk_file_test`).
+pub const pinned_moon_version = #(0, 1, 20_261_119)
+
+pub const pinned_moonc_version = #(0, 10, 22)
 
 @external(erlang, "gekko_ffi", "run_command")
 fn ffi_run_command(
@@ -260,23 +267,47 @@ fn parse_version_triplet(token: String) -> Option(#(Int, Int, Int)) {
   }
 }
 
+/// Compare two parsed versions lexicographically.
+pub fn compare_versions(
+  a: #(Int, Int, Int),
+  b: #(Int, Int, Int),
+) -> order.Order {
+  let #(a1, a2, a3) = a
+  let #(b1, b2, b3) = b
+  case int.compare(a1, b1) {
+    order.Eq ->
+      case int.compare(a2, b2) {
+        order.Eq -> int.compare(a3, b3)
+        other -> other
+      }
+    other -> other
+  }
+}
+
 /// Return True if `actual >= minimum` lexicographically.
 pub fn is_version_at_least(
   actual: #(Int, Int, Int),
   minimum: #(Int, Int, Int),
 ) -> Bool {
-  let #(a1, a2, a3) = actual
-  let #(m1, m2, m3) = minimum
-  case int.compare(a1, m1) {
-    order.Gt -> True
-    order.Lt -> False
-    order.Eq ->
-      case int.compare(a2, m2) {
-        order.Gt -> True
-        order.Lt -> False
-        order.Eq -> a3 >= m3
-      }
-  }
+  compare_versions(actual, minimum) != order.Lt
+}
+
+/// Return True if `actual` is newer than the toolchain version gekko verifies against.
+pub fn is_version_newer(
+  actual: #(Int, Int, Int),
+  verified: #(Int, Int, Int),
+) -> Bool {
+  compare_versions(actual, verified) == order.Gt
+}
+
+/// Render a parsed version triple as `major.minor.patch`.
+pub fn version_to_string(version: #(Int, Int, Int)) -> String {
+  let #(major, minor, patch) = version
+  int.to_string(major)
+  <> "."
+  <> int.to_string(minor)
+  <> "."
+  <> int.to_string(patch)
 }
 
 /// Verify that the installed `moon` CLI meets the minimum supported version
@@ -305,44 +336,76 @@ pub fn check_moon_version_compatible() -> Result(Nil, String) {
 /// Check required and optional external tools for `gekko doctor`.
 pub fn run_doctor() -> List(ToolStatus) {
   [
-    check_tool("gleam", True, ["--version"], fn(_) { #(True, "") }),
-    check_tool("moon", True, ["--version"], fn(out) {
-      case parse_moon_date_version(out) {
-        Some(ver) ->
-          case is_version_at_least(ver, min_moon_version) {
-            True -> #(True, "")
-            False -> #(False, "requires >= 0.1.20261104")
-          }
-        None -> #(True, "")
-      }
-    }),
-    check_tool("moonc", True, ["-v"], fn(out) {
-      case parse_moonc_version(out) {
-        Some(ver) ->
-          case is_version_at_least(ver, min_moonc_version) {
-            True -> #(True, "")
-            False -> #(False, "requires >= 0.10.20")
-          }
-        None -> #(True, "")
-      }
-    }),
+    check_tool("gleam", True, ["--version"], fn(_) { #(True, False, "") }),
+    check_tool("moon", True, ["--version"], validate_moon_version),
+    check_tool("moonc", True, ["-v"], validate_moonc_version),
     check_tool("wit-bindgen", False, ["--version"], fn(_) {
-      #(True, "needed for `gekko wit check` / `wit build`")
+      #(True, False, "needed for `gekko wit check` / `wit build`")
     }),
     check_tool("wasm-tools", False, ["--version"], fn(_) {
-      #(True, "needed for `gekko wit build`")
+      #(True, False, "needed for `gekko wit build`")
     }),
     check_tool("wasmtime", False, ["--version"], fn(_) {
-      #(True, "optional WASI Preview 2 component runner")
+      #(True, False, "optional WASI Preview 2 component runner")
     }),
   ]
+}
+
+fn validate_moon_version(output: String) -> #(Bool, Bool, String) {
+  case parse_moon_date_version(output) {
+    Some(ver) ->
+      case compare_versions(ver, min_moon_version) {
+        order.Lt -> #(
+          False,
+          False,
+          "requires >= " <> version_to_string(min_moon_version),
+        )
+        _ ->
+          case is_version_newer(ver, pinned_moon_version) {
+            True -> #(
+              True,
+              True,
+              "newer than verified "
+                <> version_to_string(pinned_moon_version)
+                <> "; MoonBit may have introduced breaking changes",
+            )
+            False -> #(True, False, "")
+          }
+      }
+    None -> #(True, False, "")
+  }
+}
+
+fn validate_moonc_version(output: String) -> #(Bool, Bool, String) {
+  case parse_moonc_version(output) {
+    Some(ver) ->
+      case compare_versions(ver, min_moonc_version) {
+        order.Lt -> #(
+          False,
+          False,
+          "requires >= " <> version_to_string(min_moonc_version),
+        )
+        _ ->
+          case is_version_newer(ver, pinned_moonc_version) {
+            True -> #(
+              True,
+              True,
+              "newer than verified "
+                <> version_to_string(pinned_moonc_version)
+                <> "; MoonBit may have introduced breaking changes",
+            )
+            False -> #(True, False, "")
+          }
+      }
+    None -> #(True, False, "")
+  }
 }
 
 fn check_tool(
   name: String,
   required: Bool,
   args: List(String),
-  validate: fn(String) -> #(Bool, String),
+  validate: fn(String) -> #(Bool, Bool, String),
 ) -> ToolStatus {
   case find_executable(name) {
     Error(_) ->
@@ -352,6 +415,7 @@ fn check_tool(
         found: False,
         version: None,
         ok: !required,
+        warning: False,
         note: case required {
           True -> "not found on PATH"
           False -> "not found on PATH (optional)"
@@ -372,13 +436,14 @@ fn check_tool(
       }
       case res.exit_code {
         0 -> {
-          let #(valid, note) = validate(res.output)
+          let #(valid, warning, note) = validate(res.output)
           ToolStatus(
             name:,
             required:,
             found: True,
             version: ver,
             ok: valid,
+            warning:,
             note:,
           )
         }
@@ -389,6 +454,7 @@ fn check_tool(
             found: True,
             version: ver,
             ok: !required,
+            warning: False,
             note: "exited with non-zero status",
           )
       }

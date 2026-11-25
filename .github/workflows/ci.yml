@@ -26,9 +26,9 @@ jobs:
           otp-version: "28"
           gleam-version: "1.19.2"
 
-      - name: Install MoonBit
+      - name: Install MoonBit (pinned)
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          scripts/install_moonbit.sh
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
           "$HOME/.moon/bin/moon" update
 
@@ -83,9 +83,9 @@ jobs:
           otp-version: "28"
           gleam-version: "1.19.2"
 
-      - name: Install MoonBit
+      - name: Install MoonBit (pinned)
         run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          scripts/install_moonbit.sh
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
           "$HOME/.moon/bin/moon" update
 
@@ -99,3 +99,45 @@ jobs:
           GEKKO_STDLIB_DIR="$PWD/../gekko_stdlib" \
           GEKKO_JSON_DIR="$PWD/../gekko_json" \
           ./scripts/test_ecosystem.sh
+
+  moonbit-latest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gekko
+    steps:
+      - name: Checkout gekko
+        uses: actions/checkout@v4
+        with:
+          path: gekko
+
+      - name: Setup Erlang and Gleam
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.19.2"
+
+      - name: Install latest MoonBit
+        run: |
+          scripts/install_moonbit.sh latest
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          "$HOME/.moon/bin/moon" update
+
+      - name: Install Wasm component tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools,wit-bindgen-cli,wasmtime
+
+      - name: Check formatting and types
+        run: |
+          gleam format --check src test
+          gleam check
+
+      - name: Run test suite against latest MoonBit
+        run: gleam test
+
+      - name: Report toolchain version
+        run: |
+          scripts/install.sh "$HOME/.local/bin"
+          "$HOME/.local/bin/gekko" doctor

@@ -1024,6 +1024,18 @@ pub fn staging_interface_cache_hit_and_invalidation_test() {
   Nil
 }
 
+pub fn pinned_moonbit_version_matches_disk_file_test() {
+  let assert Ok(contents) = simplifile.read(".moonbit-version")
+  assert string.contains(
+    contents,
+    "moon=" <> cmd.version_to_string(cmd.pinned_moon_version),
+  )
+  assert string.contains(
+    contents,
+    "moonc=" <> cmd.version_to_string(cmd.pinned_moonc_version),
+  )
+}
+
 pub fn toolchain_version_parallel_and_diagnostics_test() {
   assert cmd.parse_moon_date_version("moon 0.1.20261119 (738607b 2026-11-19)")
     == Some(#(0, 1, 20_261_119))
@@ -1031,6 +1043,12 @@ pub fn toolchain_version_parallel_and_diagnostics_test() {
     == Some(#(0, 10, 22))
   assert cmd.is_version_at_least(#(0, 1, 20_261_119), cmd.min_moon_version)
   assert !cmd.is_version_at_least(#(0, 1, 20_261_001), cmd.min_moon_version)
+  assert cmd.is_version_at_least(cmd.pinned_moon_version, cmd.min_moon_version)
+  assert cmd.is_version_newer(#(0, 1, 20_261_120), cmd.pinned_moon_version)
+  assert !cmd.is_version_newer(cmd.pinned_moon_version, cmd.pinned_moon_version)
+  assert !cmd.is_version_newer(#(0, 1, 20_261_118), cmd.pinned_moon_version)
+  assert cmd.version_to_string(cmd.pinned_moon_version) == "0.1.20261119"
+  assert cmd.version_to_string(cmd.pinned_moonc_version) == "0.10.22"
 
   // Parallel map preserves order and surfaces first error
   assert cmd.parallel_try_map([1, 2, 3, 4], fn(n) { Ok(n * 10) })

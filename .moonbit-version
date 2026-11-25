@@ -1,0 +1,5 @@
+# MoonBit toolchain versions verified by gekko's test suite.
+# Keep in sync with pinned_moon_version / pinned_moonc_version in
+# src/project/cmd.gleam (enforced by a test).
+moon=0.1.20261119
+moonc=0.10.22

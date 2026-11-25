@@ -2,6 +2,7 @@ import glance
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set.{type Set}
 import index/symbol_table.{type SymbolTable}
 import lower/ir.{
@@ -24,7 +25,6 @@ import emit/trait_infer.{
   collect_inspectable_type_vars, collect_type_var_names, expand_type_alias,
   freshen_ir_type, infer_expr_type, is_nullary_multi_variant_ctor, list_at_idx,
   lookup_ctor, lookup_external_type, unify_aligned_args, unify_ir_types,
-  unwrap_or,
 }
 
 /// Generic trait bounds inferred for a single top-level function.
@@ -396,7 +396,7 @@ fn extract_ffi_bounds(
   let raw =
     list.fold(ext_meta.type_params, empty_fn_bounds(), fn(acc, tp_entry) {
       let #(mbt_tp, traits) = tp_entry
-      let matched_ir = dict.get(subst, mbt_tp) |> unwrap_or([])
+      let matched_ir = dict.get(subst, mbt_tp) |> result.unwrap([])
       let raw_vars =
         list.fold(matched_ir, set.new(), fn(s, t) {
           collect_type_var_names(t, s)
@@ -434,7 +434,7 @@ fn unify_mbt_ir(
   let expanded = expand_type_alias(ir_ty, cur_mod, ctx)
   case mbt_ty, expanded {
     ffi_meta.MbtVar(v), _ -> {
-      let prev = dict.get(subst, v) |> unwrap_or([])
+      let prev = dict.get(subst, v) |> result.unwrap([])
       dict.insert(subst, v, [expanded, ..prev])
     }
     ffi_meta.MbtNamed("GList", [m_in]), IrTypeList(ir_in) ->

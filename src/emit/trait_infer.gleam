@@ -1018,10 +1018,3 @@ pub fn list_at_idx(items: List(a), index: Int) -> Option(a) {
     _, _ -> None
   }
 }
-
-pub fn unwrap_or(res: Result(a, b), default: a) -> a {
-  case res {
-    Ok(v) -> v
-    Error(_) -> default
-  }
-}

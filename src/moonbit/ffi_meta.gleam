@@ -329,7 +329,7 @@ fn extract_top_decls(source: String) -> List(String) {
       rev_decls: [],
     )
   let st_end = step_graphemes(graphemes, st0)
-  let final_decls = case collapse_ws(rev_str(st_end.rev_buf)) {
+  let final_decls = case collapse_ws(syntax.rev_str(st_end.rev_buf)) {
     "" -> st_end.rev_decls
     last -> [last, ..st_end.rev_decls]
   }
@@ -439,7 +439,7 @@ fn step_graphemes(graphemes: List(String), st: ExtractState) -> ExtractState {
             "{", _ ->
               case st.brace_depth == 0 {
                 True -> {
-                  let decl = collapse_ws(rev_str(st.rev_buf))
+                  let decl = collapse_ws(syntax.rev_str(st.rev_buf))
                   let next_decls = case decl {
                     "" -> st.rev_decls
                     _ -> [decl, ..st.rev_decls]
@@ -531,7 +531,7 @@ fn handle_normal_newline(rest: List(String), st: ExtractState) -> ExtractState {
             ExtractState(..st, at_line_start: True, rev_buf: [" ", ..st.rev_buf]),
           )
         False -> {
-          let decl = collapse_ws(rev_str(st.rev_buf))
+          let decl = collapse_ws(syntax.rev_str(st.rev_buf))
           case decl {
             "" ->
               step_graphemes(
@@ -669,12 +669,6 @@ fn has_top_level_equals_loop(
           }
       }
   }
-}
-
-fn rev_str(rev_buf: List(String)) -> String {
-  rev_buf
-  |> list.reverse
-  |> string.concat
 }
 
 fn collapse_ws(raw: String) -> String {
@@ -1231,11 +1225,11 @@ fn take_chars_while_loop(
   acc: List(String),
 ) -> String {
   case chars {
-    [] -> rev_str(acc)
+    [] -> syntax.rev_str(acc)
     [c, ..rest] ->
       case pred(c) {
         True -> take_chars_while_loop(rest, pred, [c, ..acc])
-        False -> rev_str(acc)
+        False -> syntax.rev_str(acc)
       }
   }
 }

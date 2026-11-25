@@ -2,6 +2,7 @@ import glance
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import lower/mangle
@@ -1027,10 +1028,10 @@ fn ast_type_to_resolved(
         Some(alias) -> {
           let target_mod =
             dict.get(alias_to_module, alias)
-            |> result_unwrap(alias)
+            |> result.unwrap(alias)
           let target_pkg =
             dict.get(mod_to_pkg, target_mod)
-            |> result_unwrap(package_name)
+            |> result.unwrap(package_name)
           #(target_pkg, target_mod, name)
         }
         None ->
@@ -1038,7 +1039,7 @@ fn ast_type_to_resolved(
             Ok(#(target_mod, orig_name)) -> {
               let target_pkg =
                 dict.get(mod_to_pkg, target_mod)
-                |> result_unwrap(package_name)
+                |> result.unwrap(package_name)
               #(target_pkg, target_mod, orig_name)
             }
             Error(_) ->
@@ -1142,13 +1143,6 @@ fn is_builtin_prelude_type(name: String) -> Bool {
   }
 }
 
-fn result_unwrap(res: Result(a, b), default: a) -> a {
-  case res {
-    Ok(v) -> v
-    Error(_) -> default
-  }
-}
-
 fn compute_transitive_type_flags(
   modules: Dict(String, ModuleSymbols),
   mod_to_pkg: Dict(String, String),
@@ -1166,7 +1160,7 @@ fn compute_transitive_type_flags(
 
   let all_aliases =
     dict.fold(modules, dict.new(), fn(acc, mod_name, mod_syms) {
-      let pkg_name = dict.get(mod_to_pkg, mod_name) |> result_unwrap("")
+      let pkg_name = dict.get(mod_to_pkg, mod_name) |> result.unwrap("")
       dict.fold(mod_syms.type_aliases, acc, fn(inner, alias_name, ta) {
         let resolved =
           ast_type_to_resolved(

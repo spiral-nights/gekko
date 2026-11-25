@@ -76,7 +76,7 @@ pub fn generate_project_bindings(
         _ -> Error(Nil)
       }
     })
-    |> dedupe_strings
+    |> list.unique
 
   let exported_iface_keys =
     list.filter_map(resolved.world.items, fn(item) {
@@ -86,7 +86,7 @@ pub fn generate_project_bindings(
         _ -> Error(Nil)
       }
     })
-    |> dedupe_strings
+    |> list.unique
 
   use rev_written <- result.try(
     list.try_fold(imported_iface_keys, rev_written, fn(acc, key) {
@@ -757,17 +757,6 @@ fn render_imports_excluding(
     [] -> ""
     lines -> string.join(lines, "\n") <> "\n\n"
   }
-}
-
-fn dedupe_strings(items: List(String)) -> List(String) {
-  let #(_, rev) =
-    list.fold(items, #(set.new(), []), fn(acc, item) {
-      case set.contains(acc.0, item) {
-        True -> acc
-        False -> #(set.insert(acc.0, item), [item, ..acc.1])
-      }
-    })
-  list.reverse(rev)
 }
 
 fn write_file(path: String, contents: String) -> Result(Nil, String) {

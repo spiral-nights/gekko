@@ -1652,7 +1652,7 @@ fn ensure_pkg_import(
   case dict.get(state.pkg_imports, full_pkg) {
     Ok(existing_alias) -> #(existing_alias, state)
     Error(_) -> {
-      let alias = pick_unique_alias(base_alias, 0, state.used_aliases)
+      let alias = pkg_config.pick_unique(base_alias, "_", 0, state.used_aliases)
       #(
         alias,
         AdapterState(
@@ -1662,14 +1662,6 @@ fn ensure_pkg_import(
         ),
       )
     }
-  }
-}
-
-fn pick_unique_alias(base: String, idx: Int, used: Set(String)) -> String {
-  let candidate = base <> "_" <> int.to_string(idx)
-  case set.contains(used, candidate) {
-    True -> pick_unique_alias(base, idx + 1, used)
-    False -> candidate
   }
 }
 

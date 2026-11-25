@@ -52,9 +52,20 @@ fn pick_free_pkg_dir(base: String, used: Set(String)) -> String {
 }
 
 fn pick_numbered_pkg_dir(base: String, idx: Int, used: Set(String)) -> String {
-  let candidate = base <> "__" <> int.to_string(idx)
+  pick_unique(base, "__", idx, used)
+}
+
+/// Pick `base <> separator <> idx`, incrementing `idx` until the candidate is
+/// not already in `used`.
+pub fn pick_unique(
+  base: String,
+  separator: String,
+  idx: Int,
+  used: Set(String),
+) -> String {
+  let candidate = base <> separator <> int.to_string(idx)
   case set.contains(used, candidate) {
-    True -> pick_numbered_pkg_dir(base, idx + 1, used)
+    True -> pick_unique(base, separator, idx + 1, used)
     False -> candidate
   }
 }

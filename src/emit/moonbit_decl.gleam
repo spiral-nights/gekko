@@ -94,7 +94,7 @@ pub fn register_import(
         True ->
           case set.contains(ctx.used_aliases, fallback) {
             False -> fallback
-            True -> pick_unique_alias(fallback, 2, ctx.used_aliases)
+            True -> pkg_config.pick_unique(fallback, "_", 2, ctx.used_aliases)
           }
       }
       #(
@@ -106,14 +106,6 @@ pub fn register_import(
         ),
       )
     }
-  }
-}
-
-fn pick_unique_alias(base: String, idx: Int, used: Set(String)) -> String {
-  let candidate = base <> "_" <> int.to_string(idx)
-  case set.contains(used, candidate) {
-    True -> pick_unique_alias(base, idx + 1, used)
-    False -> candidate
   }
 }
 

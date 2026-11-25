@@ -270,7 +270,7 @@ fn step_depth(c: String, parens: Int, brackets: Int) -> #(Int, Int) {
   }
 }
 
-fn rev_str(rev_buf: List(String)) -> String {
+pub fn rev_str(rev_buf: List(String)) -> String {
   rev_buf
   |> list.reverse
   |> string.concat

@@ -120,10 +120,7 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
   let generics = format_type_params(td.type_params)
   case td.external_type {
     Some(ExternalType(package:, type_name:)) -> {
-      let vis = case td.publicity {
-        glance.Public -> "pub "
-        glance.Private -> ""
-      }
+      let vis = visibility(td.publicity)
       let defined_in_patch =
         dict.has_key(ctx.ffi_metadata.types, #(ctx.current_module, td.name))
       case
@@ -311,10 +308,7 @@ fn lookup_external_type_in_table(
 
 fn emit_type_inspect_impl(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
   let ctx1 = add_gprelude_import(ctx)
-  let impl_vis = case td.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let impl_vis = visibility(td.publicity)
   let inspectable_vars =
     list.fold(td.variants, set.new(), fn(acc, v) {
       list.fold(v.fields, acc, fn(inner, f) {
@@ -451,10 +445,7 @@ fn emit_variant_field(f: IrVariantField, ctx: EmitCtx) -> #(String, EmitCtx) {
 }
 
 pub fn emit_type_alias(ta: IrTypeAlias, ctx: EmitCtx) -> #(String, EmitCtx) {
-  let vis = case ta.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let vis = visibility(ta.publicity)
   let generics = format_type_params(ta.type_params)
   let #(aliased_str, ctx1) = emit_type(ta.aliased, ctx)
   #(
@@ -464,10 +455,7 @@ pub fn emit_type_alias(ta: IrTypeAlias, ctx: EmitCtx) -> #(String, EmitCtx) {
 }
 
 pub fn emit_getter(g: IrGetter, ctx: EmitCtx) -> #(String, EmitCtx) {
-  let vis = case g.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let vis = visibility(g.publicity)
   let generics = format_type_params(g.type_params)
   let self_ty = g.type_name <> generics
   let #(ret_str, ctx1) = emit_type(g.return_type, ctx)
@@ -1415,10 +1403,7 @@ pub fn map_index_acc(
 }
 
 fn emit_type_eq_impl(td: IrTypeDef, dict_key_params: Set(String)) -> String {
-  let vis = case td.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let vis = visibility(td.publicity)
   let impl_generics = case td.type_params {
     [] -> ""
     tps ->
@@ -1696,5 +1681,13 @@ fn expr_uses_local_type(
         expr_uses_local_type(c.body, cur_mod, alias_name)
       })
     _ -> False
+  }
+}
+
+/// Render a Gleam publicity modifier as a MoonBit `pub ` prefix (or nothing).
+pub fn visibility(publicity: glance.Publicity) -> String {
+  case publicity {
+    glance.Public -> "pub "
+    glance.Private -> ""
   }
 }

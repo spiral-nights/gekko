@@ -33,7 +33,7 @@ import emit/moonbit_decl.{
   format_function_type_params, format_type_params, infer_fn_param_types,
   is_polymorphic_constant, lookup_callee_with_bounds, lookup_ctor_field_labels,
   lookup_ctor_info, lookup_fn_param_labels, map_acc, map_index_acc,
-  pattern_is_irrefutable, register_import, wrap_if_compound,
+  pattern_is_irrefutable, register_import, visibility, wrap_if_compound,
 }
 
 /// Render a lowered `IrModule` into MoonBit source code and the list of
@@ -178,10 +178,7 @@ fn emit_module_inner(
 }
 
 fn emit_constant(c: IrConstant, ctx: EmitCtx) -> #(String, EmitCtx) {
-  let vis = case c.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let vis = visibility(c.publicity)
   let type_params = ir_util.collect_type_vars_in_type(c.value_type)
   case type_params {
     [] -> {
@@ -234,10 +231,7 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
     }
     None -> f
   }
-  let vis = case f.publicity {
-    glance.Public -> "pub "
-    glance.Private -> ""
-  }
+  let vis = visibility(f.publicity)
   let #(generics, ctx0) = format_function_type_params(f, ctx)
   let #(param_strs, ctx1) = map_acc(f.params, ctx0, emit_fn_param)
   let #(ret_str, ctx2) = emit_type(f.return_type, ctx1)

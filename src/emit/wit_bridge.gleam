@@ -375,7 +375,7 @@ fn emit_iface_import_adapter(
       "\n\n",
     )
     <> "\n"
-  let moon_pkg = render_moon_pkg(final_state.pkg_imports, None)
+  let moon_pkg = pkg_config.render_moon_pkg(final_state.pkg_imports, None)
 
   let dir = filepath.join(out_dir, adapter_pkg)
   use _ <- result.try(write_file(filepath.join(dir, "moon.pkg"), moon_pkg))
@@ -503,7 +503,7 @@ fn emit_world_import_adapter(
       "\n\n",
     )
     <> "\n"
-  let moon_pkg = render_moon_pkg(final_state.pkg_imports, None)
+  let moon_pkg = pkg_config.render_moon_pkg(final_state.pkg_imports, None)
 
   let dir = filepath.join(out_dir, adapter_pkg)
   use _ <- result.try(write_file(filepath.join(dir, "moon.pkg"), moon_pkg))
@@ -633,7 +633,8 @@ fn emit_iface_export_stub(
       "\n\n",
     )
     <> "\n"
-  let moon_pkg = render_moon_pkg(final_state.pkg_imports, warnings_line)
+  let moon_pkg =
+    pkg_config.render_moon_pkg(final_state.pkg_imports, warnings_line)
 
   use _ <- result.try(write_file(pkg_file, moon_pkg))
   write_file(filepath.join(pkg_dir, "stub.mbt"), stub_src)
@@ -695,7 +696,8 @@ fn emit_world_export_stub(
       "\n\n",
     )
     <> "\n"
-  let moon_pkg = render_moon_pkg(final_state.pkg_imports, warnings_line)
+  let moon_pkg =
+    pkg_config.render_moon_pkg(final_state.pkg_imports, warnings_line)
 
   use _ <- result.try(write_file(pkg_file, moon_pkg))
   write_file(filepath.join(pkg_dir, "stub.mbt"), stub_src)
@@ -1716,13 +1718,6 @@ fn extract_raw_prefixes_from_imports(
       _ -> acc
     }
   })
-}
-
-fn render_moon_pkg(
-  pkg_imports: Dict(String, String),
-  warnings_line: Option(String),
-) -> String {
-  pkg_config.render_moon_pkg(pkg_imports, warnings_line)
 }
 
 fn write_file(path: String, contents: String) -> Result(Nil, String) {

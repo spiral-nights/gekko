@@ -928,7 +928,7 @@ fn walk_expr(
 
     IrContinue(args) -> {
       let paired_params = list.map(cur_fn.params, fn(p) { Some(p.param_type) })
-      walk_positional_args(
+      walk_positional_loop(
         args,
         paired_params,
         env,
@@ -1290,7 +1290,7 @@ fn walk_call(
           case var_ty {
             IrTypeFn(params: exp_ps, ..) -> {
               let arg_vals = list.map(args, fn(a) { a.value })
-              walk_positional_args(
+              walk_positional_loop(
                 arg_vals,
                 list.map(exp_ps, Some),
                 env,
@@ -1615,32 +1615,6 @@ fn walk_aligned_opt_args(
   })
 }
 
-fn walk_positional_args(
-  args: List(IrExpr),
-  expected_types: List(Option(IrType)),
-  env: Dict(String, IrType),
-  local_fns: Dict(String, #(IrExpr, Dict(String, IrType))),
-  cur_mod: String,
-  cur_fn: IrFunction,
-  ctx: AnalyzeCtx,
-  bmap: Dict(#(String, String), FnTraitBounds),
-  allowed: Set(String),
-  acc: FnTraitBounds,
-) -> FnTraitBounds {
-  walk_positional_loop(
-    args,
-    expected_types,
-    env,
-    local_fns,
-    cur_mod,
-    cur_fn,
-    ctx,
-    bmap,
-    allowed,
-    acc,
-  )
-}
-
 fn walk_positional_loop(
   args: List(IrExpr),
   expected_types: List(Option(IrType)),
@@ -1715,6 +1689,3 @@ fn walk_untyped_call_args(
     )
   })
 }
-// -----------------------------------------------------------------------------
-// Expression type inference & pattern binding
-// -----------------------------------------------------------------------------

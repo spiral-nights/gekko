@@ -8,17 +8,17 @@ import gleam/set.{type Set}
 import gleam/string
 import simplifile
 import wit/ast.{
-  type ResolvedWit, type WitDocument, type WitFunc, type WitIfaceRef,
-  type WitInterface, type WitPackageId, type WitResourceMethod, type WitType,
-  type WitTypeDef, type WitUse, type WitWorld, type WitWorldItem, LocalIface,
-  PkgIface, ResolvedWit, ResourceConstructor, ResourceMethod, ResourceStatic,
-  WitAlias, WitBool, WitBorrow, WitChar, WitDocument, WitEnum, WitF32, WitF64,
-  WitFlags, WitFunc, WitInterface, WitList, WitNamed, WitOption, WitOwn,
-  WitPackageId, WitRecord, WitResource, WitResourceMethod, WitResult, WitS16,
-  WitS32, WitS64, WitS8, WitString, WitTuple, WitU16, WitU32, WitU64, WitU8,
-  WitUse, WitVariant, WitWorld, WorldExportFunc, WorldExportIface,
-  WorldImportFunc, WorldImportIface, WorldInclude, WorldUse, iface_key,
-  iface_versioned_key, lookup_interface, resolve_iface_key_in,
+  type ResolvedWit, type WitFunc, type WitIfaceRef, type WitInterface,
+  type WitPackageId, type WitResourceMethod, type WitType, type WitTypeDef,
+  type WitUse, type WitWorld, type WitWorldItem, LocalIface, PkgIface,
+  ResolvedWit, ResourceConstructor, ResourceMethod, ResourceStatic, WitAlias,
+  WitBool, WitBorrow, WitChar, WitEnum, WitF32, WitF64, WitFlags, WitFunc,
+  WitInterface, WitList, WitNamed, WitOption, WitOwn, WitPackageId, WitRecord,
+  WitResource, WitResourceMethod, WitResult, WitS16, WitS32, WitS64, WitS8,
+  WitString, WitTuple, WitU16, WitU32, WitU64, WitU8, WitUse, WitVariant,
+  WitWorld, WorldExportFunc, WorldExportIface, WorldImportFunc, WorldImportIface,
+  WorldInclude, WorldUse, iface_key, iface_versioned_key, lookup_interface,
+  resolve_iface_key_in,
 }
 
 type WitToken {
@@ -45,24 +45,6 @@ type PackageBlock {
     interfaces: List(WitInterface),
     worlds: List(WitWorld),
   )
-}
-
-/// Parse a single `.wit` source file containing a root `package` declaration
-/// and interfaces/worlds.
-pub fn parse_wit_source(source: String) -> Result(WitDocument, String) {
-  use blocks <- result.try(parse_wit_blocks(source, "input.wit"))
-  case blocks {
-    [] -> Error("WIT source does not contain any package, interface, or world")
-    [first, ..] -> {
-      let pkg = case first.pkg {
-        Some(p) -> p
-        None -> WitPackageId(namespace: "root", name: "pkg", version: None)
-      }
-      let all_ifaces = list.flat_map(blocks, fn(b) { b.interfaces })
-      let all_worlds = list.flat_map(blocks, fn(b) { b.worlds })
-      Ok(WitDocument(pkg:, interfaces: all_ifaces, worlds: all_worlds))
-    }
-  }
 }
 
 /// Load and resolve all `.wit` files in `wit_dir` (and `wit_dir/deps` recursively),

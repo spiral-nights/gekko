@@ -258,24 +258,6 @@ pub fn extract_project_interface_with_packages_hash(
   )
 }
 
-/// Stage `pkg_root` inside `staging_dir` while resolving `manifest.toml` and
-/// `build/packages` from `deps_root` (falling back to `pkg_root`), then run
-/// `gleam export package-interface --out interface.json`.
-pub fn extract_package_interface_with_deps(
-  pkg_root: String,
-  deps_root: String,
-  staging_dir: String,
-) -> Result(PackageInterface, String) {
-  extract_package_interface_with_packages_hash(
-    pkg_root,
-    deps_root,
-    staging_dir,
-    None,
-  )
-}
-
-/// Like `extract_package_interface_with_deps`, reusing a precomputed hash of
-/// `build/packages` when provided.
 pub fn extract_package_interface_with_packages_hash(
   pkg_root: String,
   deps_root: String,

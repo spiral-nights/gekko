@@ -109,14 +109,9 @@ pub fn base_metadata() -> FfiMetadata {
   scan_mbt_source(seeded, "gprelude", prelude_runtime.gprelude_mbt())
 }
 
-/// Scan `<root>/moonbit/**` packages across all given package roots, starting from
-/// `base_metadata()`.
-pub fn scan_package_roots(roots: List(String)) -> FfiMetadata {
-  scan_package_roots_excluding(roots, set.new())
-}
-
-/// Like `scan_package_roots`, skipping any `.mbt` file whose canonical path
-/// is present in `excluded_files` (such as files injected via `[module_inject]`).
+/// Scan `<root>/moonbit/**` packages across all given package roots, starting
+/// from `base_metadata()`, and skipping any `.mbt` file whose canonical path is
+/// present in `excluded_files` (such as files injected via `[module_inject]`).
 pub fn scan_package_roots_excluding(
   roots: List(String),
   excluded_files: Set(String),

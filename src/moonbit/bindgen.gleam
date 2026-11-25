@@ -493,7 +493,6 @@ fn convert_fn_decl(
     && !f.raises
     && all_direct_params
     && resolved_ret.conv == Direct
-    && !is_constructor_like_direct_collision(f)
 
   let gleam_ret_ty = case f.raises {
     True -> "Result(" <> resolved_ret.gleam_ty <> ", String)"
@@ -582,10 +581,6 @@ fn convert_fn_decl(
     ),
     next_used,
   ))
-}
-
-fn is_constructor_like_direct_collision(_f: MbtiFnDecl) -> Bool {
-  False
 }
 
 fn resolve_fn_params(

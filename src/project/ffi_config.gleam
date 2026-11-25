@@ -74,22 +74,6 @@ pub type MergedOverlays {
   )
 }
 
-/// Return an empty `MergedOverlays` record.
-pub fn empty_merged_overlays() -> MergedOverlays {
-  MergedOverlays(
-    shims: [],
-    authorized_shims: dict.new(),
-    overrides: dict.new(),
-    override_sources: dict.new(),
-    type_overrides: dict.new(),
-    type_override_sources: dict.new(),
-    module_patches: dict.new(),
-    module_patch_sources: dict.new(),
-    target_branches: dict.new(),
-    patched_source_files: set.new(),
-  )
-}
-
 /// Parse FFI overrides from a `gekko.toml` file string (`[overrides."..."]`).
 pub fn parse_gekko_toml(
   content: String,

@@ -47,7 +47,7 @@ pub type EmitCtx {
   )
 }
 
-pub fn resolve_pkg_dir(ctx: EmitCtx, target_module: String) -> String {
+fn resolve_pkg_dir(ctx: EmitCtx, target_module: String) -> String {
   case dict.get(ctx.module_pkg_dirs, target_module) {
     Ok(dir) -> dir
     Error(_) -> pkg_config.module_to_pkg_dir(target_module)
@@ -891,11 +891,7 @@ pub fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
       case all_args {
         [] -> #(prefix <> constructor, ctx2)
         _ -> #(
-          prefix
-            <> constructor
-            <> "("
-            <> string.join(arg_strs_or_spread(all_args), ", ")
-            <> ")",
+          prefix <> constructor <> "(" <> string.join(all_args, ", ") <> ")",
           ctx2,
         )
       }
@@ -909,10 +905,6 @@ pub fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
       }
     }
   }
-}
-
-fn arg_strs_or_spread(items: List(String)) -> List(String) {
-  items
 }
 
 fn emit_pat_arg(arg: IrPatArg, ctx: EmitCtx) -> #(String, EmitCtx) {

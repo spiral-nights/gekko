@@ -23,7 +23,6 @@ import lower/ir.{
 import lower/ir_util
 import lower/mangle
 import lower/pattern
-import project/interface.{type ResolvedType}
 import project/text_edit
 
 import lower/desugar_types.{
@@ -1466,22 +1465,4 @@ fn lower_field_access(
       )
     }
   }
-}
-
-/// Convert a `ResolvedType` from `package-interface` into `IrType`.
-pub fn resolved_type_to_ir(
-  ty: ResolvedType,
-  named_type_params: Option(List(String)),
-  mod_syms: ModuleSymbols,
-) -> IrType {
-  desugar_types.resolved_type_to_ir(ty, named_type_params, mod_syms)
-}
-
-/// Lower an AST `glance.Type` annotation into `IrType`.
-pub fn lower_ast_type(
-  ty: glance.Type,
-  mod_syms: ModuleSymbols,
-  package_name: String,
-) -> IrType {
-  desugar_types.lower_ast_type(ty, mod_syms, package_name)
 }

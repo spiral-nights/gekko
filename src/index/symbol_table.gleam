@@ -259,12 +259,6 @@ pub fn is_excluded_for_branch(
   })
 }
 
-/// Return True if a top-level definition has `@target(javascript)` and should
-/// be skipped when compiling to MoonBit.
-pub fn is_excluded_target(attributes: List(glance.Attribute)) -> Bool {
-  is_excluded_for_branch(attributes, PreferErlang)
-}
-
 /// Resolve the active `@target(...)` branch for `(package_name, mod_name)`.
 pub fn resolve_target_branch(
   package_name: String,

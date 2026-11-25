@@ -106,15 +106,6 @@ pub type WitWorld {
   WitWorld(pkg: WitPackageId, name: String, items: List(WitWorldItem))
 }
 
-/// Parsed single `.wit` file representation.
-pub type WitDocument {
-  WitDocument(
-    pkg: WitPackageId,
-    interfaces: List(WitInterface),
-    worlds: List(WitWorld),
-  )
-}
-
 /// Resolved WIT package directory centered around one selected `world`.
 pub type ResolvedWit {
   ResolvedWit(

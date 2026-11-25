@@ -491,14 +491,6 @@ pub fn find_import_alias(
   }
 }
 
-pub fn resolved_type_to_ir(
-  ty: ResolvedType,
-  named_type_params: Option(List(String)),
-  mod_syms: ModuleSymbols,
-) -> IrType {
-  resolved_type_to_ir_with_table(ty, named_type_params, mod_syms, None)
-}
-
 pub fn resolved_type_to_ir_with_table(
   ty: ResolvedType,
   named_type_params: Option(List(String)),
@@ -583,15 +575,6 @@ pub fn resolved_type_to_ir_with_table(
       IrTypeVar(name)
     }
   }
-}
-
-/// Lower an AST `glance.Type` annotation into `IrType`.
-pub fn lower_ast_type(
-  ty: glance.Type,
-  mod_syms: ModuleSymbols,
-  package_name: String,
-) -> IrType {
-  lower_ast_type_with_table(ty, mod_syms, package_name, None)
 }
 
 pub fn lower_ast_type_with_table(

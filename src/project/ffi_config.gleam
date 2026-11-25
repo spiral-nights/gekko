@@ -80,30 +80,18 @@ pub type MergedOverlays {
 pub fn parse_gekko_toml(
   content: String,
 ) -> Result(Dict(String, FfiKind), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["overrides"]) {
-    Ok(table) -> collect_overrides(table, [])
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["overrides"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_ffi_kind)
+  })
 }
 
 /// Parse FFI overrides from a `gleam.toml` file string (`[tools.gekko.overrides."..."]`).
 pub fn parse_gleam_toml_overrides(
   content: String,
 ) -> Result(Dict(String, FfiKind), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["tools", "gekko", "overrides"]) {
-    Ok(table) -> collect_overrides(table, [])
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["tools", "gekko", "overrides"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_ffi_kind)
+  })
 }
 
 /// Load and merge FFI overrides from `<project_root>/gleam.toml` (`[tools.gekko.overrides]`)
@@ -124,11 +112,12 @@ pub fn load_project_overrides(
 pub fn parse_moonbit_deps_gekko_toml(
   content: String,
 ) -> Result(List(#(String, String)), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  use dep_map <- result.try(extract_string_table(parsed, ["moonbit", "deps"]))
+  use dep_map <- result.try(parse_section(
+    content,
+    ["moonbit", "deps"],
+    dict.new(),
+    collect_string_entries,
+  ))
   Ok(sort_dep_pairs(dep_map))
 }
 
@@ -299,57 +288,124 @@ fn extract_string_table(
   case tom.get_table(parsed, key_path) {
     Error(tom.NotFound(_)) -> Ok(dict.new())
     Error(err) -> Error(format_get_error(err))
-    Ok(table) ->
-      dict.to_list(table)
-      |> list.try_fold(dict.new(), fn(acc, entry) {
-        let #(pkg, val) = entry
-        case val {
-          tom.String(ver) -> Ok(dict.insert(acc, pkg, ver))
-          _ ->
-            Error("MoonBit dependency '" <> pkg <> "' version must be a string")
-        }
-      })
+    Ok(table) -> collect_string_entries(table)
   }
+}
+
+fn collect_string_entries(
+  table: Dict(String, Toml),
+) -> Result(Dict(String, String), String) {
+  dict.to_list(table)
+  |> list.try_fold(dict.new(), fn(acc, entry) {
+    let #(pkg, val) = entry
+    case val {
+      tom.String(ver) -> Ok(dict.insert(acc, pkg, ver))
+      _ -> Error("MoonBit dependency '" <> pkg <> "' version must be a string")
+    }
+  })
+}
+
+fn parse_section(
+  content: String,
+  key_path: List(String),
+  default: a,
+  extractor: fn(Dict(String, Toml)) -> Result(a, String),
+) -> Result(a, String) {
+  use parsed <- result.try(
+    tom.parse(content)
+    |> result.map_error(format_parse_error),
+  )
+  section_from(Some(parsed), key_path, default, extractor)
+}
+
+fn section_from(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+  default: a,
+  extractor: fn(Dict(String, Toml)) -> Result(a, String),
+) -> Result(a, String) {
+  case parsed {
+    None -> Ok(default)
+    Some(parsed) ->
+      case tom.get_table(parsed, key_path) {
+        Ok(table) -> extractor(table)
+        Error(tom.NotFound(_)) -> Ok(default)
+        Error(err) -> Error(format_get_error(err))
+      }
+  }
+}
+
+fn load_toml_document(
+  path: String,
+) -> Result(Option(Dict(String, Toml)), String) {
+  case simplifile.read(path) {
+    Ok(content) -> {
+      use parsed <- result.try(
+        tom.parse(content)
+        |> result.map_error(format_parse_error),
+      )
+      Ok(Some(parsed))
+    }
+    Error(simplifile.Enoent) -> Ok(None)
+    Error(err) ->
+      Error("Failed to read " <> path <> ": " <> simplifile.describe_error(err))
+  }
+}
+
+fn overlay_shim(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Option(ShimMeta), String) {
+  section_from(parsed, key_path, None, extract_shim_meta)
+}
+
+fn overlay_authorized_shims(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Dict(String, String), String) {
+  section_from(parsed, key_path, dict.new(), extract_authorized_shims_table)
+}
+
+fn overlay_overrides(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Dict(String, FfiKind), String) {
+  section_from(parsed, key_path, dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_ffi_kind)
+  })
+}
+
+fn overlay_type_overrides(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Dict(String, ExternalType), String) {
+  section_from(parsed, key_path, dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_type_override)
+  })
+}
+
+fn overlay_module_patches(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Dict(String, ModulePatch), String) {
+  section_from(parsed, key_path, dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_module_patch)
+  })
+}
+
+fn overlay_target_branches(
+  parsed: Option(Dict(String, Toml)),
+  key_path: List(String),
+) -> Result(Dict(String, TargetBranch), String) {
+  section_from(parsed, key_path, dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_target_branch)
+  })
 }
 
 fn sort_dep_pairs(deps: Dict(String, String)) -> List(#(String, String)) {
   deps
   |> dict.to_list
   |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
-}
-
-fn collect_overrides(
-  table: Dict(String, Toml),
-  prefix: List(String),
-) -> Result(Dict(String, FfiKind), String) {
-  dict.to_list(table)
-  |> list.try_fold(dict.new(), fn(acc, entry) {
-    let #(key, value) = entry
-    case value {
-      tom.Table(sub) | tom.InlineTable(sub) ->
-        case extract_ffi_kind(sub, [key, ..prefix]) {
-          Ok(Some(kind)) -> {
-            let full_key =
-              [key, ..prefix]
-              |> list.reverse
-              |> string.join(".")
-            Ok(dict.insert(acc, full_key, kind))
-          }
-          Ok(None) -> {
-            use nested <- result.try(collect_overrides(sub, [key, ..prefix]))
-            Ok(dict.merge(acc, nested))
-          }
-          Error(msg) -> Error(msg)
-        }
-      _ -> {
-        let full_key =
-          [key, ..prefix]
-          |> list.reverse
-          |> string.join(".")
-        Error("Expected table for override key '" <> full_key <> "'")
-      }
-    }
-  })
 }
 
 fn extract_ffi_kind(
@@ -454,82 +510,63 @@ fn format_get_error(err: tom.GetError) -> String {
 pub fn parse_shim_gekko_toml(
   content: String,
 ) -> Result(Option(ShimMeta), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  extract_shim_meta(parsed, ["shim_for"])
+  parse_section(content, ["shim_for"], None, extract_shim_meta)
 }
 
 /// Parse `[tools.gekko.shim_for]` metadata from a `gleam.toml` string.
 pub fn parse_shim_gleam_toml(
   content: String,
 ) -> Result(Option(ShimMeta), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
+  parse_section(
+    content,
+    ["tools", "gekko", "shim_for"],
+    None,
+    extract_shim_meta,
   )
-  extract_shim_meta(parsed, ["tools", "gekko", "shim_for"])
 }
 
 fn extract_shim_meta(
-  parsed: Dict(String, Toml),
-  key_path: List(String),
+  table: Dict(String, Toml),
 ) -> Result(Option(ShimMeta), String) {
-  case tom.get_table(parsed, key_path) {
-    Error(tom.NotFound(_)) -> Ok(None)
-    Error(err) -> Error(format_get_error(err))
-    Ok(table) -> {
-      use target <- result.try(case dict.get(table, "package") {
-        Ok(tom.String(t)) ->
-          case string.trim(t) {
-            "" -> Error("Shim 'package' must not be empty")
-            trimmed -> Ok(trimmed)
-          }
-        Ok(_) -> Error("Shim 'package' must be String")
-        Error(_) -> Error("[tools.gekko.shim_for] must specify 'package'")
-      })
-      use version <- result.try(case dict.get(table, "version") {
-        Error(_) -> Ok(None)
-        Ok(tom.String(v)) -> {
-          use _ <- result.try(parse_version_constraint(v))
-          Ok(Some(v))
-        }
-        Ok(_) -> Error("Shim 'version' must be String")
-      })
-      Ok(Some(ShimMeta(target:, version:)))
+  use target <- result.try(case dict.get(table, "package") {
+    Ok(tom.String(t)) ->
+      case string.trim(t) {
+        "" -> Error("Shim 'package' must not be empty")
+        trimmed -> Ok(trimmed)
+      }
+    Ok(_) -> Error("Shim 'package' must be String")
+    Error(_) -> Error("[tools.gekko.shim_for] must specify 'package'")
+  })
+  use version <- result.try(case dict.get(table, "version") {
+    Error(_) -> Ok(None)
+    Ok(tom.String(v)) -> {
+      use _ <- result.try(parse_version_constraint(v))
+      Ok(Some(v))
     }
-  }
+    Ok(_) -> Error("Shim 'version' must be String")
+  })
+  Ok(Some(ShimMeta(target:, version:)))
 }
 
 /// Parse `[type_overrides."..."]` from a `gekko.toml` string.
 pub fn parse_type_overrides_gekko_toml(
   content: String,
 ) -> Result(Dict(String, ExternalType), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["type_overrides"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_type_override)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["type_overrides"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_type_override)
+  })
 }
 
 /// Parse `[tools.gekko.type_overrides."..."]` from a `gleam.toml` string.
 pub fn parse_type_overrides_gleam_toml(
   content: String,
 ) -> Result(Dict(String, ExternalType), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
+  parse_section(
+    content,
+    ["tools", "gekko", "type_overrides"],
+    dict.new(),
+    fn(table) { collect_nested_entries(table, [], extract_type_override) },
   )
-  case tom.get_table(parsed, ["tools", "gekko", "type_overrides"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_type_override)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
 }
 
 fn extract_type_override(
@@ -568,30 +605,18 @@ fn extract_type_override(
 pub fn parse_module_patch_gekko_toml(
   content: String,
 ) -> Result(Dict(String, ModulePatch), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["patch"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_module_patch)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["patch"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_module_patch)
+  })
 }
 
 /// Parse `[tools.gekko.patch."..."]` from a `gleam.toml` string.
 pub fn parse_module_patch_gleam_toml(
   content: String,
 ) -> Result(Dict(String, ModulePatch), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["tools", "gekko", "patch"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_module_patch)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["tools", "gekko", "patch"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_module_patch)
+  })
 }
 
 fn extract_module_patch(
@@ -800,30 +825,21 @@ fn validate_patch_import(
 pub fn parse_target_branch_gekko_toml(
   content: String,
 ) -> Result(Dict(String, TargetBranch), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
-  )
-  case tom.get_table(parsed, ["target_branch"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_target_branch)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
+  parse_section(content, ["target_branch"], dict.new(), fn(table) {
+    collect_nested_entries(table, [], extract_target_branch)
+  })
 }
 
 /// Parse `[tools.gekko.target_branch."..."]` from a `gleam.toml` string.
 pub fn parse_target_branch_gleam_toml(
   content: String,
 ) -> Result(Dict(String, TargetBranch), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
+  parse_section(
+    content,
+    ["tools", "gekko", "target_branch"],
+    dict.new(),
+    fn(table) { collect_nested_entries(table, [], extract_target_branch) },
   )
-  case tom.get_table(parsed, ["tools", "gekko", "target_branch"]) {
-    Ok(table) -> collect_nested_entries(table, [], extract_target_branch)
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-  }
 }
 
 fn extract_target_branch(
@@ -885,55 +901,49 @@ fn collect_nested_entries(
 pub fn parse_authorized_shims_gekko_toml(
   content: String,
 ) -> Result(Dict(String, String), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
+  parse_section(
+    content,
+    ["use_shims"],
+    dict.new(),
+    extract_authorized_shims_table,
   )
-  extract_authorized_shims(parsed, ["use_shims"])
 }
 
 /// Parse `[tools.gekko.use_shims]` authorization allowlist from a `gleam.toml` string.
 pub fn parse_authorized_shims_gleam_toml(
   content: String,
 ) -> Result(Dict(String, String), String) {
-  use parsed <- result.try(
-    tom.parse(content)
-    |> result.map_error(format_parse_error),
+  parse_section(
+    content,
+    ["tools", "gekko", "use_shims"],
+    dict.new(),
+    extract_authorized_shims_table,
   )
-  extract_authorized_shims(parsed, ["tools", "gekko", "use_shims"])
 }
 
-fn extract_authorized_shims(
-  parsed: Dict(String, Toml),
-  key_path: List(String),
+fn extract_authorized_shims_table(
+  table: Dict(String, Toml),
 ) -> Result(Dict(String, String), String) {
-  case tom.get_table(parsed, key_path) {
-    Error(tom.NotFound(_)) -> Ok(dict.new())
-    Error(err) -> Error(format_get_error(err))
-    Ok(table) ->
-      dict.to_list(table)
-      |> list.try_fold(dict.new(), fn(acc, entry) {
-        let #(target_pkg, val) = entry
-        case val {
-          tom.String(shim_pkg) ->
-            case string.trim(shim_pkg) {
-              "" ->
-                Error(
-                  "Shim authorization for '"
-                  <> target_pkg
-                  <> "' must not be empty",
-                )
-              trimmed -> Ok(dict.insert(acc, target_pkg, trimmed))
-            }
-          _ ->
+  dict.to_list(table)
+  |> list.try_fold(dict.new(), fn(acc, entry) {
+    let #(target_pkg, val) = entry
+    case val {
+      tom.String(shim_pkg) ->
+        case string.trim(shim_pkg) {
+          "" ->
             Error(
-              "Shim authorization for '"
-              <> target_pkg
-              <> "' must be a String (shim package name)",
+              "Shim authorization for '" <> target_pkg <> "' must not be empty",
             )
+          trimmed -> Ok(dict.insert(acc, target_pkg, trimmed))
         }
-      })
-  }
+      _ ->
+        Error(
+          "Shim authorization for '"
+          <> target_pkg
+          <> "' must be a String (shim package name)",
+        )
+    }
+  })
 }
 
 /// Load and merge all overlay sections (`shim_for`, `use_shims`, `overrides`, `type_overrides`,
@@ -942,42 +952,37 @@ pub fn load_package_overlay(
   pkg_root: String,
   pkg_name: String,
 ) -> Result(PackageOverlay, String) {
-  use #(shim_g, shim_k) <- result.try(load_toml_pair(
-    pkg_root,
-    None,
-    parse_shim_gleam_toml,
-    parse_shim_gekko_toml,
-  ))
-  use #(auth_g, auth_k) <- result.try(load_toml_pair(
-    pkg_root,
-    dict.new(),
-    parse_authorized_shims_gleam_toml,
-    parse_authorized_shims_gekko_toml,
-  ))
-  use #(ovr_g, ovr_k) <- result.try(load_toml_pair(
-    pkg_root,
-    dict.new(),
-    parse_gleam_toml_overrides,
-    parse_gekko_toml,
-  ))
-  use #(ty_g, ty_k) <- result.try(load_toml_pair(
-    pkg_root,
-    dict.new(),
-    parse_type_overrides_gleam_toml,
-    parse_type_overrides_gekko_toml,
-  ))
-  use #(pat_g, pat_k) <- result.try(load_toml_pair(
-    pkg_root,
-    dict.new(),
-    parse_module_patch_gleam_toml,
-    parse_module_patch_gekko_toml,
-  ))
-  use #(br_g, br_k) <- result.try(load_toml_pair(
-    pkg_root,
-    dict.new(),
-    parse_target_branch_gleam_toml,
-    parse_target_branch_gekko_toml,
-  ))
+  use gleam_doc <- result.try(
+    load_toml_document(filepath.join(pkg_root, "gleam.toml")),
+  )
+  use gekko_doc <- result.try(
+    load_toml_document(filepath.join(pkg_root, "gekko.toml")),
+  )
+
+  use shim_g <- result.try(
+    overlay_shim(gleam_doc, ["tools", "gekko", "shim_for"]),
+  )
+  use shim_k <- result.try(overlay_shim(gekko_doc, ["shim_for"]))
+  use auth_g <- result.try(
+    overlay_authorized_shims(gleam_doc, ["tools", "gekko", "use_shims"]),
+  )
+  use auth_k <- result.try(overlay_authorized_shims(gekko_doc, ["use_shims"]))
+  use ovr_g <- result.try(
+    overlay_overrides(gleam_doc, ["tools", "gekko", "overrides"]),
+  )
+  use ovr_k <- result.try(overlay_overrides(gekko_doc, ["overrides"]))
+  use ty_g <- result.try(
+    overlay_type_overrides(gleam_doc, ["tools", "gekko", "type_overrides"]),
+  )
+  use ty_k <- result.try(overlay_type_overrides(gekko_doc, ["type_overrides"]))
+  use pat_g <- result.try(
+    overlay_module_patches(gleam_doc, ["tools", "gekko", "patch"]),
+  )
+  use pat_k <- result.try(overlay_module_patches(gekko_doc, ["patch"]))
+  use br_g <- result.try(
+    overlay_target_branches(gleam_doc, ["tools", "gekko", "target_branch"]),
+  )
+  use br_k <- result.try(overlay_target_branches(gekko_doc, ["target_branch"]))
 
   let shim = case shim_k {
     Some(_) -> shim_k

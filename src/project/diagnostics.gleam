@@ -76,28 +76,28 @@ fn collect_gleam_symbol_lines(
   ast_mod: glance.Module,
   source: String,
 ) -> Dict(String, Int) {
-  let d0 =
-    list.fold(ast_mod.custom_types, dict.new(), fn(acc, def) {
-      let #(line, _) =
-        text_edit.byte_offset_to_line_col(source, def.definition.location.start)
-      dict.insert(acc, def.definition.name, line)
+  let definitions =
+    list.map(ast_mod.custom_types, fn(def) {
+      #(def.definition.name, def.definition.location.start)
     })
-  let d1 =
-    list.fold(ast_mod.type_aliases, d0, fn(acc, def) {
-      let #(line, _) =
-        text_edit.byte_offset_to_line_col(source, def.definition.location.start)
-      dict.insert(acc, def.definition.name, line)
-    })
-  let d2 =
-    list.fold(ast_mod.constants, d1, fn(acc, def) {
-      let #(line, _) =
-        text_edit.byte_offset_to_line_col(source, def.definition.location.start)
-      dict.insert(acc, def.definition.name, line)
-    })
-  list.fold(ast_mod.functions, d2, fn(acc, def) {
-    let #(line, _) =
-      text_edit.byte_offset_to_line_col(source, def.definition.location.start)
-    dict.insert(acc, def.definition.name, line)
+    |> list.append(
+      list.map(ast_mod.type_aliases, fn(def) {
+        #(def.definition.name, def.definition.location.start)
+      }),
+    )
+    |> list.append(
+      list.map(ast_mod.constants, fn(def) {
+        #(def.definition.name, def.definition.location.start)
+      }),
+    )
+    |> list.append(
+      list.map(ast_mod.functions, fn(def) {
+        #(def.definition.name, def.definition.location.start)
+      }),
+    )
+  list.fold(definitions, dict.new(), fn(acc, definition) {
+    let #(name, offset) = definition
+    dict.insert(acc, name, text_edit.byte_offset_to_line(source, offset))
   })
 }
 

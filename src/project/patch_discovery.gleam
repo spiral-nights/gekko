@@ -6,6 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import project/text_edit
 import simplifile
 
 /// Kind of MoonBit declaration annotated with `#gekko.patch`.
@@ -425,7 +426,7 @@ fn parse_decl_header(
     |> list.take(8)
     |> string.join(" ")
     |> string.trim
-  let after_vis = strip_visibility_prefix(joined)
+  let after_vis = text_edit.strip_visibility_prefix(joined)
   case
     string.starts_with(after_vis, "fn["),
     string.starts_with(after_vis, "fn "),
@@ -624,32 +625,6 @@ fn read_keyword_decl(s: String) -> Option(#(String, String)) {
     }
   })
   |> option.from_result
-}
-
-fn strip_visibility_prefix(s: String) -> String {
-  let trimmed = string.trim(s)
-  let prefixes = ["pub(all)", "pub(open)", "pub(readonly)", "pub", "priv"]
-  let stripped =
-    list.find_map(prefixes, fn(pfx) {
-      case string.starts_with(trimmed, pfx) {
-        True -> {
-          let rest = string.drop_start(trimmed, string.length(pfx))
-          case
-            rest == ""
-            || string.starts_with(rest, " ")
-            || string.starts_with(rest, "\t")
-          {
-            True -> Ok(string.trim(rest))
-            False -> Error(Nil)
-          }
-        }
-        False -> Error(Nil)
-      }
-    })
-  case stripped {
-    Ok(rest) -> rest
-    Error(_) -> trimmed
-  }
 }
 
 fn skip_balanced_brackets(s: String) -> Result(String, Nil) {

@@ -165,7 +165,7 @@ fn extract_decl_symbol(trimmed: String) -> Option(String) {
   {
     True -> None
     False -> {
-      let after_vis = strip_visibility_prefix(trimmed)
+      let after_vis = text_edit.strip_visibility_prefix(trimmed)
       case after_vis {
         "enum " <> rest -> take_ident_before_delim(rest)
         "type " <> rest -> take_ident_before_delim(rest)
@@ -180,15 +180,6 @@ fn extract_decl_symbol(trimmed: String) -> Option(String) {
         _ -> None
       }
     }
-  }
-}
-
-fn strip_visibility_prefix(s: String) -> String {
-  case s {
-    "pub(all) " <> rest -> rest
-    "pub " <> rest -> rest
-    "priv " <> rest -> rest
-    _ -> s
   }
 }
 

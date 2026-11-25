@@ -133,3 +133,31 @@ fn count_newlines(bits: BitArray, line: Int) -> Int {
     _ -> line
   }
 }
+
+/// Remove a leading MoonBit visibility modifier (`pub`, `pub(all)`,
+/// `pub(open)`, `pub(readonly)`, `priv`) and surrounding whitespace.
+pub fn strip_visibility_prefix(s: String) -> String {
+  let trimmed = string.trim(s)
+  let prefixes = ["pub(all)", "pub(open)", "pub(readonly)", "pub", "priv"]
+  let stripped =
+    list.find_map(prefixes, fn(pfx) {
+      case string.starts_with(trimmed, pfx) {
+        True -> {
+          let rest = string.drop_start(trimmed, string.length(pfx))
+          case
+            rest == ""
+            || string.starts_with(rest, " ")
+            || string.starts_with(rest, "\t")
+          {
+            True -> Ok(string.trim(rest))
+            False -> Error(Nil)
+          }
+        }
+        False -> Error(Nil)
+      }
+    })
+  case stripped {
+    Ok(rest) -> rest
+    Error(_) -> trimmed
+  }
+}

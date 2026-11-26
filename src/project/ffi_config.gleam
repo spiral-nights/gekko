@@ -44,6 +44,7 @@ pub type ModulePatch {
     types: List(String),
     type_aliases: List(#(String, ExternalType)),
     functions: List(String),
+    decl_locs: List(patch_discovery.PatchDeclLoc),
   )
 }
 
@@ -693,27 +694,7 @@ fn extract_module_patch(
       case files {
         [] -> Error("Patch '" <> key_name <> "' must specify at least one file")
         _ -> {
-          use imports <- result.try(case dict.get(table, "imports") {
-            Error(_) -> Ok([])
-            Ok(tom.Array(items)) ->
-              list.try_map(items, fn(item) {
-                case item {
-                  tom.String(spec) -> parse_patch_import_spec(spec, key_name)
-                  _ ->
-                    Error(
-                      "Patch '"
-                      <> key_name
-                      <> "' field 'imports' must be an array of Strings",
-                    )
-                }
-              })
-            Ok(_) ->
-              Error(
-                "Patch '"
-                <> key_name
-                <> "' field 'imports' must be an array of Strings",
-              )
-          })
+          use imports <- result.try(extract_imports_field(table, key_name))
           use types <- result.try(extract_string_array(table, "types", key_name))
           use functions <- result.try(extract_string_array(
             table,
@@ -721,16 +702,69 @@ fn extract_module_patch(
             key_name,
           ))
           Ok(
-            Some(ModulePatch(
-              files:,
-              imports:,
-              types:,
-              type_aliases: [],
-              functions:,
-            )),
+            Some(
+              ModulePatch(
+                files:,
+                imports:,
+                types:,
+                type_aliases: [],
+                functions:,
+                decl_locs: [],
+              ),
+            ),
           )
         }
       }
+    }
+  }
+}
+
+fn extract_imports_field(
+  table: Dict(String, Toml),
+  key_name: String,
+) -> Result(List(ModulePatchImport), String) {
+  case dict.get(table, "imports") {
+    Error(_) -> Ok([])
+    Ok(tom.Array(items)) ->
+      list.try_map(items, fn(item) {
+        case item {
+          tom.String(spec) -> parse_patch_import_spec(spec, key_name)
+          _ ->
+            Error(
+              "Patch '"
+              <> key_name
+              <> "' field 'imports' must be an array of Strings",
+            )
+        }
+      })
+    Ok(_) ->
+      Error(
+        "Patch '" <> key_name <> "' field 'imports' must be an array of Strings",
+      )
+  }
+}
+
+fn extract_patches_imports(
+  table: Dict(String, Toml),
+  rev_key_parts: List(String),
+) -> Result(Option(ModulePatch), String) {
+  let key_name = rev_key_parts |> list.reverse |> string.join(".")
+  case dict.has_key(table, "imports") {
+    False -> Ok(None)
+    True -> {
+      use imports <- result.try(extract_imports_field(table, key_name))
+      Ok(
+        Some(
+          ModulePatch(
+            files: [],
+            imports:,
+            types: [],
+            type_aliases: [],
+            functions: [],
+            decl_locs: [],
+          ),
+        ),
+      )
     }
   }
 }
@@ -807,7 +841,14 @@ fn validate_patch_import(
   raw: String,
 ) -> Result(ModulePatchImport, String) {
   let p = string.trim(pkg)
-  let a = option.map(alias, string.trim)
+  let a =
+    option.map(alias, fn(raw_a) {
+      let t = string.trim(raw_a)
+      case string.starts_with(t, "@") {
+        True -> string.drop_start(t, 1)
+        False -> t
+      }
+    })
   case p, a {
     "", _ | _, Some("") ->
       Error(
@@ -979,6 +1020,19 @@ pub fn load_package_overlay(
     overlay_module_patches(gleam_doc, ["tools", "gekko", "patch"]),
   )
   use pat_k <- result.try(overlay_module_patches(gekko_doc, ["patch"]))
+  use patches_imp_g <- result.try(
+    section_from(
+      gleam_doc,
+      ["tools", "gekko", "patches"],
+      dict.new(),
+      fn(table) { collect_nested_entries(table, [], extract_patches_imports) },
+    ),
+  )
+  use patches_imp_k <- result.try(
+    section_from(gekko_doc, ["patches"], dict.new(), fn(table) {
+      collect_nested_entries(table, [], extract_patches_imports)
+    }),
+  )
   use br_g <- result.try(
     overlay_target_branches(gleam_doc, ["tools", "gekko", "target_branch"]),
   )
@@ -1003,6 +1057,19 @@ pub fn load_package_overlay(
       list.fold(patch.files, acc, fn(s, f) { set.insert(s, f.source_path) })
     })
   let target_pkg = option.map(shim, fn(s) { s.target })
+  let raw_import_patches =
+    merge_module_patch_dicts(patches_imp_g, patches_imp_k)
+  let import_patches = case target_pkg {
+    None -> raw_import_patches
+    Some(tp) ->
+      dict.fold(raw_import_patches, dict.new(), fn(acc, k, v) {
+        let qualified = case string.contains(k, ":") {
+          True -> k
+          False -> tp <> ":" <> k
+        }
+        dict.insert(acc, qualified, v)
+      })
+  }
   use discovered_raw <- result.try(patch_discovery.discover_directory_patches(
     pkg_root,
     pkg_name,
@@ -1012,6 +1079,7 @@ pub fn load_package_overlay(
   let discovered_patches = convert_discovered_patches(discovered_raw)
   let resolved_patches =
     merge_module_patch_dicts(resolved_toml_patches, discovered_patches)
+    |> merge_module_patch_dicts(import_patches)
 
   let #(patch_fn_overrides, patch_type_overrides) =
     expand_patch_entries(resolved_patches)
@@ -1056,6 +1124,7 @@ fn convert_discovered_patches(
       types: p.types,
       type_aliases:,
       functions: p.functions,
+      decl_locs: p.decl_locs,
     )
   })
 }
@@ -1155,7 +1224,10 @@ fn merge_two_patches(a: ModulePatch, b: ModulePatch) -> ModulePatch {
   let functions =
     list.append(a.functions, b.functions)
     |> dedup_by(fn(f) { f })
-  ModulePatch(files:, imports:, types:, type_aliases:, functions:)
+  let decl_locs =
+    list.append(a.decl_locs, b.decl_locs)
+    |> dedup_by(fn(l) { #(l.file_path, l.line, l.gleam_name) })
+  ModulePatch(files:, imports:, types:, type_aliases:, functions:, decl_locs:)
 }
 
 fn dedup_by(items: List(a), key_fn: fn(a) -> k) -> List(a) {

@@ -5,13 +5,14 @@ import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
 
-/// Map a Gleam module path (`"my_app/auth/token"`) into a MoonBit package
-/// directory name under the workspace root (`"my_app_auth_token"`).
+/// Map a Gleam module path (`"my_app/auth/token"`) into a nested MoonBit
+/// package directory name under the workspace root (`"my_app/auth/token"`).
 pub fn module_to_pkg_dir(module_name: String) -> String {
-  let base = string.replace(module_name, "/", "_")
-  case base {
-    "gprelude" | "prelude" -> "mod_" <> base
-    _ -> base
+  case module_name {
+    "gprelude" -> "mod_gprelude"
+    "prelude" -> "mod_prelude"
+    "gprelude/" <> rest -> "mod_gprelude/" <> rest
+    _ -> module_name
   }
 }
 

@@ -1,9 +1,11 @@
 import filepath
+import gekko
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import project/cmd
+import project/diagnostics
 import project/ffi_config
 import project/loader
 import project/patch_discovery
@@ -269,17 +271,15 @@ pub fn multi_error_unmapped_externals_and_shim_cli_test() {
   assert string.contains(err, "raw_lib:raw_lib.second")
 
   // `gekko shim inspect raw_lib` must list both functions and the opaque type
-  let assert Ok(report) = shim_cli.inspect_package(root, "raw_lib")
+  let assert Ok(report) = shim_cli.inspect_package(root, Some("raw_lib"))
   assert string.contains(report, "raw_lib.OpaqueHandle")
   assert string.contains(report, "raw_lib.first")
   assert string.contains(report, "raw_lib.second")
-  assert string.contains(report, "[tools.gekko.shim_for]")
-  assert string.contains(report, "#gekko.patch")
 
-  // `gekko shim init raw_lib` scaffolds [tools.gekko.shim_for] in gleam.toml and
-  // #gekko.patch stubs in patches/<mod>/ without creating gekko.toml
+  // `gekko shim new raw_lib` scaffolds [tools.gekko.shim_for] in gleam.toml and
+  // #gekko.patch stubs in patches/<mod>/ without creating gekko.toml or moon.pkg
   let shim_out = filepath.join(root, "gekko_raw_lib")
-  let assert Ok(_) = shim_cli.init_shim(root, "raw_lib", Some(shim_out))
+  let assert Ok(_) = shim_cli.new_shim(root, "raw_lib", Some(shim_out))
   assert simplifile.is_file(filepath.join(shim_out, "gekko.toml")) != Ok(True)
   let assert Ok(shim_toml) =
     simplifile.read(filepath.join(shim_out, "gleam.toml"))
@@ -287,11 +287,11 @@ pub fn multi_error_unmapped_externals_and_shim_cli_test() {
   assert string.contains(shim_toml, "package = \"raw_lib\"")
   assert string.contains(shim_toml, ">= 1.0.0 and < 2.0.0")
   assert simplifile.is_file(filepath.join(shim_out, "patches/raw_lib/moon.pkg"))
-    == Ok(True)
+    != Ok(True)
   let assert Ok(stub_mbt) =
     simplifile.read(filepath.join(shim_out, "patches/raw_lib/raw_lib.mbt"))
   assert string.contains(stub_mbt, "#gekko.patch")
-  assert string.contains(stub_mbt, "pub type OpaqueHandle")
+  assert string.contains(stub_mbt, "pub(all) enum OpaqueHandle")
   assert string.contains(stub_mbt, "pub fn first(")
   assert string.contains(stub_mbt, "pub fn second(")
 
@@ -385,19 +385,27 @@ pub fn companion_shim_end_to_end_moon_test() {
     cmd.run(command: "moon", args: ["test", "--target", "wasm"], cwd: out_dir)
   assert test_run.exit_code == 0
 
-  // 4. Verify stale patch file cleanup + version mismatch & stale override warnings
+  // 4. Verify version mismatch warning, unmatched override error, and stale patch cleanup
   assert simplifile.write(
       to: filepath.join(shim_dir, "gleam.toml"),
-      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]\npackage = \"upstream_ffi\"\nfunction = \"nope\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 2.0.0\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
     )
     == Ok(Nil)
   let assert Ok(summary2) = workspace.transpile_project(root, out_dir)
   assert list.any(summary2.warnings, fn(w) {
     string.contains(w, "expects 'upstream_lib' (>= 2.0.0)")
   })
-  assert list.any(summary2.warnings, fn(w) {
-    string.contains(w, "upstream_lib:upstream_lib.nonexistent_fn")
-  })
+
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream_lib\"\nversion = \"0.1.0\"\n\n[tools.gekko.shim_for]\npackage = \"upstream_lib\"\nversion = \">= 1.0.0 and < 2.0.0\"\n\n[tools.gekko.overrides.\"upstream_lib:upstream_lib.nonexistent_fn\"]\npackage = \"upstream_ffi\"\nfunction = \"nope\"\n\n[tools.gekko.target_branch.\"upstream_lib:upstream_lib\"]\nprefer = \"javascript\"\n",
+    )
+    == Ok(Nil)
+  let assert Error(unmatched_err) = workspace.transpile_project(root, out_dir)
+  assert string.contains(
+    unmatched_err,
+    "upstream_lib:upstream_lib.nonexistent_fn",
+  )
 
   // Remove patches/ and verify stale __gekko_patch_*.mbt is deleted
   let _ = simplifile.delete(file_or_dir_at: filepath.join(shim_dir, "patches"))
@@ -478,6 +486,8 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         target_override: None,
         type_alias: None,
         line: 3,
+        is_pub: False,
+        param_count: None,
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchFn,
@@ -485,6 +495,8 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         target_override: Some("println"),
         type_alias: None,
         line: 9,
+        is_pub: True,
+        param_count: Some(1),
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchType,
@@ -492,6 +504,8 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         target_override: None,
         type_alias: Some(#("gprelude", "Dynamic")),
         line: 14,
+        is_pub: True,
+        param_count: None,
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchType,
@@ -499,6 +513,8 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         target_override: None,
         type_alias: Some(#("builtin", "Option")),
         line: 17,
+        is_pub: True,
+        param_count: None,
       ),
       patch_discovery.DiscoveredPatchAttr(
         kind: patch_discovery.PatchFn,
@@ -506,6 +522,8 @@ pub fn patch_discovery_attributes_and_moon_pkg_test() {
         target_override: None,
         type_alias: None,
         line: 20,
+        is_pub: True,
+        param_count: Some(2),
       ),
     ]
 
@@ -651,4 +669,312 @@ pub fn dependency_overlay_security_scoping_test() {
       ]),
     )
   let assert Ok(_) = ffi_config.merge_overlays([], root_ov)
+}
+
+pub fn patches_mirror_lsp_scaffold_guards_and_clean_test() {
+  let root = "build/test_fixtures/shim_lsp_mirror_proj"
+  let dep_dir = filepath.join(root, "deps/up_lib")
+  let out_dir = filepath.join(root, "build/moonbit")
+  let patches_dir = filepath.join(root, "patches")
+  let _ = simplifile.delete(file_or_dir_at: root)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(dep_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(patches_dir, "up/alpha"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(patches_dir, "up/gamma"))
+    == Ok(Nil)
+
+  // Upstream package with patched (up/alpha) -> unpatched (up/beta) -> patched (up/gamma)
+  assert simplifile.write(
+      to: filepath.join(dep_dir, "gleam.toml"),
+      contents: "name = \"up_lib\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(dep_dir, "src/up/gamma.gleam"),
+      contents: "@external(erlang, \"erl_g\", \"tag_num\")\npub fn tag_num(x: Int) -> Int {\n  let _ = x\n  panic as \"todo\"\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(dep_dir, "src/up/beta.gleam"),
+      contents: "import up/gamma\npub fn wrap_tag(x: Int) -> Int { gamma.tag_num(x) + 1 }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(dep_dir, "src/up/alpha.gleam"),
+      contents: "import up/beta\n\npub type Mode {\n  Fast\n  Slow(Int)\n}\n\n@external(erlang, \"erl_a\", \"scale\")\npub fn scale(x: Int) -> Float\n\n@external(erlang, \"erl_a\", \"fallback_todo\")\npub fn fallback_todo(x: Int) -> Int {\n  let _ = x\n  todo\n}\n\npub fn pure_compute(m: Mode, x: Int) -> Int {\n  case m {\n    Fast -> beta.wrap_tag(x)\n    Slow(k) -> beta.wrap_tag(x) + k\n  }\n}\n",
+    )
+    == Ok(Nil)
+
+  // Shim repo root using [tools.gekko.shim_for] and [tools.gekko.patches."up/alpha"]
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gekko_up_lib\"\nversion = \"0.1.0\"\n\n[dependencies]\nup_lib = { path = \"deps/up_lib\" }\n\n[tools.gekko.shim_for]\npackage = \"up_lib\"\nversion = \">= 1.0.0 and < 2.0.0\"\n\n[tools.gekko.patches.\"up/alpha\"]\nimports = [\"moonbitlang/core/math\"]\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/gekko_up_lib.gleam"),
+      contents: "pub fn main() -> Nil { Nil }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/gamma/gamma.mbt"),
+      contents: "///|\n#gekko.patch\npub fn tag_num(x : Int64) -> Int64 {\n  x * 10L\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/alpha/alpha.mbt"),
+      contents: "///|\n#gekko.patch\npub fn scale(x : Int64) -> Double {\n  @math.floor(x.to_double())\n}\n",
+    )
+    == Ok(Nil)
+
+  // 1. Before patching fallback_todo, missing_externals includes it and --strict fails
+  let assert Ok(summary0) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert list.contains(
+    summary0.missing_externals,
+    "up_lib:up/alpha.fallback_todo",
+  )
+  let assert Error(strict_err) =
+    gekko.build_project_with_strict_options(
+      root,
+      None,
+      Some(out_dir),
+      "wasm",
+      ".",
+      False,
+      True,
+    )
+  assert string.contains(strict_err, "up/alpha.fallback_todo")
+
+  // 2. Mirror-equality check: patches/ matches build/moonbit byte-for-byte
+  let assert Ok(b_mod) = simplifile.read(filepath.join(out_dir, "moon.mod"))
+  let assert Ok(p_mod) = simplifile.read(filepath.join(patches_dir, "moon.mod"))
+  assert b_mod == p_mod
+
+  let assert Ok(b_alpha_pkg) =
+    simplifile.read(filepath.join(out_dir, "up/alpha/moon.pkg"))
+  let assert Ok(p_alpha_pkg) =
+    simplifile.read(filepath.join(patches_dir, "up/alpha/moon.pkg"))
+  assert b_alpha_pkg == p_alpha_pkg
+
+  let assert Ok(b_beta_pkg) =
+    simplifile.read(filepath.join(out_dir, "up/beta/moon.pkg"))
+  let assert Ok(p_beta_pkg) =
+    simplifile.read(filepath.join(patches_dir, "up/beta/moon.pkg"))
+  assert b_beta_pkg == p_beta_pkg
+
+  let assert Ok(b_alpha_mbt) =
+    simplifile.read(filepath.join(out_dir, "up/alpha/alpha.mbt"))
+  let assert Ok(p_alpha_mbt) =
+    simplifile.read(filepath.join(patches_dir, "up/alpha/alpha.g.mbt"))
+  assert b_alpha_mbt == p_alpha_mbt
+
+  let assert Ok(b_beta_mbt) =
+    simplifile.read(filepath.join(out_dir, "up/beta/beta.mbt"))
+  let assert Ok(p_beta_mbt) =
+    simplifile.read(filepath.join(patches_dir, "up/beta/beta.g.mbt"))
+  assert b_beta_mbt == p_beta_mbt
+
+  // 3. moon check --deny-warn passes BOTH inside patches/ AND at root via moon.work
+  let chk_patches =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: patches_dir,
+    )
+  assert chk_patches.exit_code == 0
+  let chk_root =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: root,
+    )
+  assert chk_root.exit_code == 0
+
+  // 4. Scaffolding: `gekko shim init` scaffolds missing `fallback_todo`, idempotency,
+  //    `patch_decl` for type `Mode`, and `inspect` reports 0 missing
+  let assert Ok(init_msg) = shim_cli.init_in_place(root)
+  assert string.contains(init_msg, "up/alpha.fallback_todo")
+  let assert Ok(alpha_after_init) =
+    simplifile.read(filepath.join(patches_dir, "up/alpha/alpha.mbt"))
+  assert string.contains(
+    alpha_after_init,
+    "pub fn fallback_todo(x : Int64) -> Int64",
+  )
+  // Idempotent second call leaves file untouched
+  let assert Ok(_) = shim_cli.patch_decl(root, "up/alpha.fallback_todo")
+  assert simplifile.read(filepath.join(patches_dir, "up/alpha/alpha.mbt"))
+    == Ok(alpha_after_init)
+
+  // Scaffold type Mode (must compile inside patches/)
+  let assert Ok(_) = shim_cli.patch_decl(root, "up/alpha.Mode")
+  let assert Ok(inspect_clean) = shim_cli.inspect_package(root, None)
+  assert string.contains(inspect_clean, "Missing external functions: none")
+  assert string.contains(inspect_clean, "Unmatched entries: 0")
+
+  let assert Ok(summary1) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert summary1.missing_externals == []
+  let chk_after_scaffold =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: patches_dir,
+    )
+  assert chk_after_scaffold.exit_code == 0
+
+  // Unannotated declaration conflict must error
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/alpha/alpha.mbt"),
+      contents: alpha_after_init
+        <> "\n///|\npub fn pure_compute(m : Mode, x : Int64) -> Int64 {\n  x\n}\n",
+    )
+    == Ok(Nil)
+  let assert Error(unannotated_err) =
+    shim_cli.patch_decl(root, "up/alpha.pure_compute")
+  assert string.contains(unannotated_err, "without #gekko.patch")
+
+  // Restore clean alpha.mbt
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/alpha/alpha.mbt"),
+      contents: alpha_after_init,
+    )
+    == Ok(Nil)
+
+  // 5. Guard #3: Type baseline & drift detection + ack
+  let assert Ok(_) = shim_cli.ack_shims(root)
+  assert simplifile.is_file(filepath.join(
+      patches_dir,
+      ".gekko_baseline/up/alpha.toml",
+    ))
+    == Ok(True)
+
+  // Mutate upstream Mode variant
+  assert simplifile.write(
+      to: filepath.join(dep_dir, "src/up/alpha.gleam"),
+      contents: "import up/beta\n\npub type Mode {\n  Fast\n  Slow(Int)\n  Turbo\n}\n\n@external(erlang, \"erl_a\", \"scale\")\npub fn scale(x: Int) -> Float\n\n@external(erlang, \"erl_a\", \"fallback_todo\")\npub fn fallback_todo(x: Int) -> Int {\n  let _ = x\n  todo\n}\n\npub fn pure_compute(m: Mode, x: Int) -> Int {\n  case m {\n    Fast -> beta.wrap_tag(x)\n    Slow(k) -> beta.wrap_tag(x) + k\n    Turbo -> 0\n  }\n}\n",
+    )
+    == Ok(Nil)
+  let assert Error(drift_err) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert string.contains(drift_err, "Type drift")
+  assert string.contains(drift_err, "up/alpha.Mode")
+  assert string.contains(drift_err, "gekko shim ack")
+
+  let assert Ok(_) = shim_cli.ack_shims(root)
+  let assert Ok(_) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+
+  // 6. Guard #2: Visibility/arity pre-check + __gekko_sigcheck_* sourcemap annotation
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/gamma/gamma.mbt"),
+      contents: "///|\n#gekko.patch\nfn tag_num(x : Int64) -> Int64 {\n  x\n}\n",
+    )
+    == Ok(Nil)
+  let assert Error(vis_err) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert string.contains(vis_err, "Signature mismatch")
+  assert string.contains(vis_err, "patches/up/gamma/gamma.mbt:2")
+
+  // Arity check
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/gamma/gamma.mbt"),
+      contents: "///|\n#gekko.patch\npub fn tag_num(x : Int64, extra : Int64) -> Int64 {\n  x + extra\n}\n",
+    )
+    == Ok(Nil)
+  let assert Error(arity_err) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  assert string.contains(arity_err, "expects 1 parameter(s), got 2")
+
+  // Wrong return type (passes pre-check arity, caught by moon check via __gekko_sigcheck_tag_num)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/gamma/gamma.mbt"),
+      contents: "///|\n#gekko.patch\npub fn tag_num(x : Int64) -> String {\n  x.to_string()\n}\n",
+    )
+    == Ok(Nil)
+  let assert Ok(_) =
+    workspace.transpile_project_with_tests(root, out_dir, False)
+  let bad_chk =
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+  assert bad_chk.exit_code != 0
+  let annotated_sig = diagnostics.annotate_moon_output(out_dir, bad_chk.output)
+  assert string.contains(
+    annotated_sig,
+    "Patch source: patches/up/gamma/gamma.mbt:2",
+  )
+
+  // Restore gamma.mbt and verify gekko clean preserves tracked .mbt + .gekko_baseline
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "up/gamma/gamma.mbt"),
+      contents: "///|\n#gekko.patch\npub fn tag_num(x : Int64) -> Int64 {\n  x * 10L\n}\n",
+    )
+    == Ok(Nil)
+  let assert Ok(_) = gekko.clean_project(root)
+  assert simplifile.is_file(filepath.join(patches_dir, "up/gamma/gamma.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(
+      patches_dir,
+      ".gekko_baseline/up/alpha.toml",
+    ))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(patches_dir, "moon.mod")) != Ok(True)
+  assert simplifile.is_file(filepath.join(patches_dir, "up/alpha/moon.pkg"))
+    != Ok(True)
+  assert simplifile.is_file(filepath.join(patches_dir, "up/alpha/alpha.g.mbt"))
+    != Ok(True)
+  assert simplifile.is_file(filepath.join(root, "moon.work")) != Ok(True)
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn shim_migrate_single_file_and_moon_pkg_test() {
+  let root = "build/test_fixtures/shim_migrate_proj"
+  let patches_dir = filepath.join(root, "patches")
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(patches_dir, "gleam/sub"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"my_shim\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "top.mbt"),
+      contents: "///|\n#gekko.patch\npub fn hi() -> Unit { () }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "gleam/dict.mbt"),
+      contents: "///|\n#gekko.patch\npub fn size() -> Int64 { 0L }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "gleam/sub/moon.pkg"),
+      contents: "import {\n  \"moonbitlang/core/math\",\n  \"my_shim/gprelude\",\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(patches_dir, "gleam/sub/sub.mbt"),
+      contents: "///|\n#gekko.patch\npub fn f() -> Double { @math.floor(1.0) }\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = shim_cli.migrate_shims(root)
+  assert simplifile.is_file(filepath.join(patches_dir, "top/top.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(patches_dir, "gleam/dict/dict.mbt"))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(patches_dir, "gleam/sub/moon.pkg"))
+    != Ok(True)
+  let assert Ok(toml) = simplifile.read(filepath.join(root, "gleam.toml"))
+  assert string.contains(toml, "[tools.gekko.patches.\"gleam/sub\"]")
+  assert string.contains(toml, "\"moonbitlang/core/math\"")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
 }

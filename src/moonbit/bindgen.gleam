@@ -13,7 +13,7 @@ import moonbit/bindgen_adapter.{
   NarrowByte, NarrowInt16, NarrowInt32, NarrowUInt16, NarrowUInt32, OptionConv,
   ReinterpretUInt64, ResolvedTypeSpec, ResultConv, StringViewConv, TupleConv,
   build_adapter_fn, build_external_type_decls, emit_adapter_helpers,
-  emit_adapter_moon_pkg, format_fn_label, generate_const_items,
+  emit_adapter_moon_pkg_with_prelude, format_fn_label, generate_const_items,
   generate_type_helper_items, int_range_names, last_segment_snake,
   pick_unique_gleam_name, pkg_to_moon_alias, render_gleam_source,
   sanitize_gleam_type_var, to_snake_case,
@@ -26,6 +26,7 @@ import project/cmd
 import project/ffi_config
 import project/fs
 import project/loader
+import project/moonbit_ffi
 import project/workspace
 import simplifile
 
@@ -48,6 +49,22 @@ pub fn generate_bindings(
   pkg: MbtiPackage,
   project_name: String,
   gleam_module_name: String,
+) -> BindgenResult {
+  generate_bindings_with_gprelude_mod(
+    pkg,
+    project_name,
+    gleam_module_name,
+    project_name,
+  )
+}
+
+/// Like `generate_bindings`, using `gprelude_mod_name <> "/gprelude"` for the
+/// generated adapter's `@gprelude` import (e.g. matching `moonbit/moon.mod`).
+pub fn generate_bindings_with_gprelude_mod(
+  pkg: MbtiPackage,
+  project_name: String,
+  gleam_module_name: String,
+  gprelude_mod_name: String,
 ) -> BindgenResult {
   let target_alias = pkg_to_moon_alias(pkg.package_name)
   let adapter_pkg_name = last_segment_snake(pkg.package_name) <> "_adapter"
@@ -148,8 +165,9 @@ pub fn generate_bindings(
         list.append(helper_defs, adapter_fns)
         |> string.join("\n\n")
       let pkg_file =
-        emit_adapter_moon_pkg(
+        emit_adapter_moon_pkg_with_prelude(
           bctx,
+          gprelude_mod_name <> "/gprelude",
           needs_gprelude,
           needs_float,
           needs_int16,
@@ -197,7 +215,19 @@ pub fn bind_package(
     Some(m) -> normalize_module_name(m)
     None -> inferred_default_mod
   }
-  let res = generate_bindings(parsed, project_name, target_mod)
+  let moon_mod_name =
+    moonbit_ffi.read_moon_mod_name(filepath.join(
+      project_root,
+      "moonbit/moon.mod",
+    ))
+    |> option.unwrap(project_name)
+  let res =
+    generate_bindings_with_gprelude_mod(
+      parsed,
+      project_name,
+      target_mod,
+      moon_mod_name,
+    )
 
   let gleam_dest =
     filepath.join(project_root, "src/" <> res.gleam_module_path <> ".gleam")

@@ -94,7 +94,8 @@ fn scaffold_into_dir(
     <> "[tools.gekko.use_shims]\n"
     <> "gleam_stdlib = \"gekko_stdlib\"\n"
 
-  let gitignore = "build/\ndist/\nmoon.work\n*.wasm\n*.exe\n"
+  let gitignore =
+    "build/\ndist/\n/_build/\n/moon.work\n/moonbit/gprelude/\n/patches/moon.mod\n/patches/gprelude/\n/patches/_build/\n/patches/.mooncakes/\npatches/**/moon.pkg\npatches/**/*.g.mbt\npkg.generated.mbti\n*.wasm\n*.exe\n"
 
   let main_src =
     "import gleam/io\n\n"

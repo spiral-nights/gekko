@@ -301,3 +301,21 @@ pub fn is_effect_free_expr(expr: IrExpr) -> Bool {
     _ -> False
   }
 }
+
+/// Return True if `f` is an `@external(...)` function whose effective body is
+/// still a single `panic`/`todo` stub and has no MoonBit FFI mapping or patch.
+pub fn needs_shim(f: ir.IrFunction) -> Bool {
+  f.external && f.ffi == option.None && is_panic_or_todo_body(f.body)
+}
+
+fn is_panic_or_todo_body(body: List(IrStmt)) -> Bool {
+  case body {
+    [] -> True
+    [IrStmtExpr(IrAbort(kind: ir.PanicAbort, ..))]
+    | [IrStmtExpr(IrAbort(kind: ir.TodoAbort, ..))] -> True
+    [IrStmtLet(pattern: ir.IrPatDiscard, annotation: option.None, ..), ..rest] ->
+      is_panic_or_todo_body(rest)
+    [IrStmtExpr(IrBlock(inner))] -> is_panic_or_todo_body(inner)
+    _ -> False
+  }
+}

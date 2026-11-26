@@ -343,6 +343,26 @@ pub fn load_discovered_dependencies(
   target_branches: Dict(String, TargetBranch),
   packages_hash: Option(String),
 ) -> Result(List(LoadedDependency), String) {
+  load_discovered_dependencies_with_validation(
+    project_root,
+    ordered,
+    ffi_overrides,
+    target_branches,
+    packages_hash,
+    True,
+  )
+}
+
+/// Like `load_discovered_dependencies`, optionally skipping the unmapped
+/// external validation check (used by `gekko shim` inspection/scaffolding).
+pub fn load_discovered_dependencies_with_validation(
+  project_root: String,
+  ordered: List(DiscoveredPkg),
+  ffi_overrides: Dict(String, FfiKind),
+  target_branches: Dict(String, TargetBranch),
+  packages_hash: Option(String),
+  validate_externals: Bool,
+) -> Result(List(LoadedDependency), String) {
   cmd.parallel_try_map(ordered, fn(pkg) {
     load_single_dependency(
       project_root,
@@ -350,6 +370,7 @@ pub fn load_discovered_dependencies(
       ffi_overrides,
       target_branches,
       packages_hash,
+      validate_externals,
     )
   })
 }
@@ -710,6 +731,7 @@ fn load_single_dependency(
   ffi_overrides: Dict(String, FfiKind),
   target_branches: Dict(String, TargetBranch),
   packages_hash: Option(String),
+  validate_externals: Bool,
 ) -> Result(LoadedDependency, String) {
   let src_dir = filepath.join(pkg.package_root, "src")
   use modules <- result.try(case simplifile.is_directory(src_dir) {
@@ -726,12 +748,16 @@ fn load_single_dependency(
         interface: None,
       ))
     _ -> {
-      use _ <- result.try(validate_dependency_externals(
-        pkg.package_name,
-        modules,
-        ffi_overrides,
-        target_branches,
-      ))
+      use _ <- result.try(case validate_externals {
+        True ->
+          validate_dependency_externals(
+            pkg.package_name,
+            modules,
+            ffi_overrides,
+            target_branches,
+          )
+        False -> Ok(Nil)
+      })
 
       let dep_staging =
         project_root
@@ -843,7 +869,7 @@ fn validate_dependency_externals(
                   <> int.to_string(line)
                   <> ":"
                   <> int.to_string(col)
-                  <> " (run 'gekko shim init "
+                  <> " (run 'gekko shim new "
                   <> pkg_name
                   <> "' to scaffold a companion shim, or add #gekko.patch in patches/)"
                 [msg, ..err_acc]

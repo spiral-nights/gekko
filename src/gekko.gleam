@@ -11,6 +11,7 @@ import gleam/string
 import moonbit/bindgen
 import project/cmd
 import project/diagnostics
+import project/fs
 import project/scaffold
 import project/shim_cli
 import project/workspace
@@ -27,15 +28,26 @@ pub type BuildOutput {
 }
 
 pub type CliAction {
-  CheckAction(root: String, out: Option(String), target: Option(String))
+  CheckAction(
+    root: String,
+    out: Option(String),
+    target: Option(String),
+    strict: Bool,
+  )
   BuildAction(
     root: String,
     out: Option(String),
     work_dir: Option(String),
     target: String,
     release: Bool,
+    strict: Bool,
   )
-  TestAction(root: String, out: Option(String), target: Option(String))
+  TestAction(
+    root: String,
+    out: Option(String),
+    target: Option(String),
+    strict: Bool,
+  )
   RunAction(
     root: String,
     out: Option(String),
@@ -67,8 +79,13 @@ pub type CliAction {
     module: Option(String),
     out: Option(String),
   )
-  ShimInspectAction(root: String, package: String)
-  ShimInitAction(root: String, package: String, out: Option(String))
+  ShimNewAction(root: String, package: String, out: Option(String))
+  ShimInitAction(root: String)
+  ShimInspectAction(root: String, package: Option(String))
+  ShimPatchDeclAction(root: String, target: String)
+  ShimPatchModuleAction(root: String, module: String)
+  ShimMigrateAction(root: String)
+  ShimAckAction(root: String)
   HelpAction
   VersionAction
 }
@@ -102,21 +119,30 @@ pub fn main() -> Nil {
     }
     Ok(HelpAction) -> print_usage()
     Ok(VersionAction) -> io.println("gekko " <> version)
-    Ok(CheckAction(root:, out:, target:)) -> {
+    Ok(CheckAction(root:, out:, target:, strict:)) -> {
       require_tools_or_halt(["gleam", "moon"])
-      run_moon_workflow(root, out, "check", False, target, True, [])
+      run_moon_workflow(root, out, "check", False, target, True, strict, [])
     }
-    Ok(BuildAction(root:, out:, work_dir:, target:, release:)) -> {
+    Ok(BuildAction(root:, out:, work_dir:, target:, release:, strict:)) -> {
       require_tools_or_halt(["gleam", "moon"])
-      run_build(root, out, work_dir, target, release)
+      run_build(root, out, work_dir, target, release, strict)
     }
-    Ok(TestAction(root:, out:, target:)) -> {
+    Ok(TestAction(root:, out:, target:, strict:)) -> {
       require_tools_or_halt(["gleam", "moon"])
-      run_moon_workflow(root, out, "test", False, target, True, [])
+      run_moon_workflow(root, out, "test", False, target, True, strict, [])
     }
     Ok(RunAction(root:, out:, target:, program_args:)) -> {
       require_tools_or_halt(["gleam", "moon"])
-      run_moon_workflow(root, out, "run", True, target, False, program_args)
+      run_moon_workflow(
+        root,
+        out,
+        "run",
+        True,
+        target,
+        False,
+        False,
+        program_args,
+      )
     }
     Ok(NewAction(name:, with_wit:)) -> run_new(name, with_wit)
     Ok(InitAction(root:, with_wit:)) -> run_init(root, with_wit)
@@ -136,13 +162,32 @@ pub fn main() -> Nil {
       require_tools_or_halt(["moon"])
       run_moonbit_bind(root, package, module, out)
     }
+    Ok(ShimNewAction(root:, package:, out:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_new(root, package, out)
+    }
+    Ok(ShimInitAction(root:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_init(root)
+    }
     Ok(ShimInspectAction(root:, package:)) -> {
       require_tools_or_halt(["gleam"])
       run_shim_inspect(root, package)
     }
-    Ok(ShimInitAction(root:, package:, out:)) -> {
+    Ok(ShimPatchDeclAction(root:, target:)) -> {
       require_tools_or_halt(["gleam"])
-      run_shim_init(root, package, out)
+      run_shim_patch_decl(root, target)
+    }
+    Ok(ShimPatchModuleAction(root:, module:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_patch_module(root, module)
+    }
+    Ok(ShimMigrateAction(root:)) -> {
+      run_shim_migrate(root)
+    }
+    Ok(ShimAckAction(root:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_ack(root)
     }
   }
 }
@@ -175,6 +220,7 @@ fn run_moon_workflow(
   pass_main_pkg: Bool,
   target: Option(String),
   include_tests: Bool,
+  strict: Bool,
   program_args: List(String),
 ) -> Nil {
   let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
@@ -185,6 +231,13 @@ fn run_moon_workflow(
     }
     Ok(summary) -> {
       list.each(summary.warnings, io.println_error)
+      case check_strict_missing(strict, summary.missing_externals) {
+        Error(err) -> {
+          io.println_error("gekko error: " <> err)
+          halt(1)
+        }
+        Ok(Nil) -> Nil
+      }
       let target_args = case target {
         Some(t) -> [moon_subcmd, "--target", t]
         None -> [moon_subcmd]
@@ -220,14 +273,39 @@ fn run_moon_workflow(
   }
 }
 
+fn check_strict_missing(
+  strict: Bool,
+  missing_externals: List(String),
+) -> Result(Nil, String) {
+  case strict, missing_externals {
+    True, [_, ..] ->
+      Error(
+        "Missing MoonBit implementations for @external functions (--strict):\n  - "
+        <> string.join(missing_externals, "\n  - "),
+      )
+    _, _ -> Ok(Nil)
+  }
+}
+
 fn run_build(
   root: String,
   out: Option(String),
   work_dir: Option(String),
   target: String,
   release: Bool,
+  strict: Bool,
 ) -> Nil {
-  case build_project_with_options(root, out, work_dir, target, ".", release) {
+  case
+    build_project_with_strict_options(
+      root,
+      out,
+      work_dir,
+      target,
+      ".",
+      release,
+      strict,
+    )
+  {
     Error(err) -> {
       io.println_error("gekko error: " <> err)
       halt(1)
@@ -296,6 +374,28 @@ pub fn build_project_with_options(
   output_base_dir: String,
   release: Bool,
 ) -> Result(BuildOutput, String) {
+  build_project_with_strict_options(
+    root,
+    out,
+    work_dir_opt,
+    target,
+    output_base_dir,
+    release,
+    False,
+  )
+}
+
+/// Like `build_project_with_options`, optionally failing when `--strict` finds
+/// unimplemented `@external` functions.
+pub fn build_project_with_strict_options(
+  root: String,
+  out: Option(String),
+  work_dir_opt: Option(String),
+  target: String,
+  output_base_dir: String,
+  release: Bool,
+  strict: Bool,
+) -> Result(BuildOutput, String) {
   let work_dir =
     option.unwrap(work_dir_opt, filepath.join(root, "build/moonbit"))
   use summary <- result.try(workspace.transpile_project_with_tests(
@@ -303,6 +403,7 @@ pub fn build_project_with_options(
     work_dir,
     False,
   ))
+  use _ <- result.try(check_strict_missing(strict, summary.missing_externals))
 
   let build_args = case release {
     True -> ["build", "--release", "--target", target]
@@ -711,16 +812,20 @@ fn run_init(root: String, with_wit: Bool) -> Nil {
   }
 }
 
-/// Remove generated `gekko` staging and MoonBit workspace directories under `root`.
+/// Remove generated `gekko` staging and MoonBit workspace artifacts under `root`.
 pub fn clean_project(root: String) -> Result(List(String), String) {
-  let targets = [
+  let dir_targets = [
     filepath.join(root, "build/moonbit"),
     filepath.join(root, "build/.gekko_staging"),
     filepath.join(root, "build/.gekko_staging_deps"),
     filepath.join(root, "build/.gekko_gprelude"),
+    filepath.join(root, "moonbit/gprelude"),
+    filepath.join(root, "patches/gprelude"),
+    filepath.join(root, "patches/_build"),
+    filepath.join(root, "patches/.mooncakes"),
   ]
   use removed_dirs <- result.try(
-    list.try_fold(targets, [], fn(acc, path) {
+    list.try_fold(dir_targets, [], fn(acc, path) {
       case simplifile.is_directory(path) {
         Ok(True) -> {
           use _ <- result.try(
@@ -738,27 +843,110 @@ pub fn clean_project(root: String) -> Result(List(String), String) {
       }
     }),
   )
-  let moon_work_path = filepath.join(root, "moon.work")
-  use removed_all <- result.try(case simplifile.read(moon_work_path) {
-    Ok(content) ->
-      case string.starts_with(content, "// Generated by gekko") {
-        True -> {
+  let file_targets = [
+    filepath.join(root, "patches/moon.mod"),
+    filepath.join(root, "patches/.gekko_generated"),
+  ]
+  use removed_files <- result.try(
+    list.try_fold(file_targets, removed_dirs, fn(acc, path) {
+      case simplifile.is_file(path) {
+        Ok(True) -> {
           use _ <- result.try(
-            simplifile.delete_file(at: moon_work_path)
+            simplifile.delete_file(at: path)
             |> result.map_error(fn(err) {
               "Failed to remove '"
-              <> moon_work_path
+              <> path
               <> "': "
               <> simplifile.describe_error(err)
             }),
           )
-          Ok([moon_work_path, ..removed_dirs])
+          Ok([path, ..acc])
         }
-        False -> Ok(removed_dirs)
+        _ -> Ok(acc)
       }
-    _ -> Ok(removed_dirs)
+    }),
+  )
+  let patches_dir = filepath.join(root, "patches")
+  use removed_patch_files <- result.try(
+    case simplifile.is_directory(patches_dir) {
+      Ok(True) ->
+        clean_generated_in_patches_dir(patches_dir, patches_dir, removed_files)
+      _ -> Ok(removed_files)
+    },
+  )
+  let moon_work_path = filepath.join(root, "moon.work")
+  use removed_all <- result.try(case fs.has_generated_marker(moon_work_path) {
+    True -> {
+      use _ <- result.try(
+        simplifile.delete_file(at: moon_work_path)
+        |> result.map_error(fn(err) {
+          "Failed to remove '"
+          <> moon_work_path
+          <> "': "
+          <> simplifile.describe_error(err)
+        }),
+      )
+      Ok([moon_work_path, ..removed_patch_files])
+    }
+    False -> Ok(removed_patch_files)
   })
   Ok(list.reverse(removed_all))
+}
+
+fn clean_generated_in_patches_dir(
+  dir: String,
+  patches_root: String,
+  acc: List(String),
+) -> Result(List(String), String) {
+  use entries <- result.try(
+    simplifile.read_directory(at: dir)
+    |> result.map_error(fn(err) {
+      "Failed to read '" <> dir <> "': " <> simplifile.describe_error(err)
+    }),
+  )
+  use next_acc <- result.try(
+    list.try_fold(list.sort(entries, string.compare), acc, fn(cur, entry) {
+      let full = filepath.join(dir, entry)
+      case string.starts_with(entry, ".") {
+        True -> Ok(cur)
+        False ->
+          case simplifile.is_directory(full) {
+            Ok(True) -> clean_generated_in_patches_dir(full, patches_root, cur)
+            _ -> {
+              let should_delete =
+                string.ends_with(entry, ".g.mbt")
+                || { entry == "moon.pkg" && fs.has_generated_marker(full) }
+              case should_delete {
+                True -> {
+                  use _ <- result.try(
+                    simplifile.delete_file(at: full)
+                    |> result.map_error(fn(err) {
+                      "Failed to remove '"
+                      <> full
+                      <> "': "
+                      <> simplifile.describe_error(err)
+                    }),
+                  )
+                  Ok([full, ..cur])
+                }
+                False -> Ok(cur)
+              }
+            }
+          }
+      }
+    }),
+  )
+  case dir != patches_root {
+    True ->
+      case simplifile.read_directory(at: dir) {
+        Ok([]) -> {
+          let _ = simplifile.delete(file_or_dir_at: dir)
+          Ok(next_acc)
+        }
+        _ -> Ok(next_acc)
+      }
+    False -> Ok(next_acc)
+  }
 }
 
 fn run_clean(root: String) -> Nil {
@@ -935,7 +1123,27 @@ fn run_moonbit_bind(
   }
 }
 
-fn run_shim_inspect(root: String, package: String) -> Nil {
+fn run_shim_new(root: String, package: String, out: Option(String)) -> Nil {
+  case shim_cli.new_shim(root, package, out) {
+    Error(err) -> {
+      io.println_error("gekko shim new error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
+fn run_shim_init(root: String) -> Nil {
+  case shim_cli.init_in_place(root) {
+    Error(err) -> {
+      io.println_error("gekko shim init error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
+fn run_shim_inspect(root: String, package: Option(String)) -> Nil {
   case shim_cli.inspect_package(root, package) {
     Error(err) -> {
       io.println_error("gekko shim inspect error: " <> err)
@@ -945,10 +1153,40 @@ fn run_shim_inspect(root: String, package: String) -> Nil {
   }
 }
 
-fn run_shim_init(root: String, package: String, out: Option(String)) -> Nil {
-  case shim_cli.init_shim(root, package, out) {
+fn run_shim_patch_decl(root: String, target: String) -> Nil {
+  case shim_cli.patch_decl(root, target) {
     Error(err) -> {
-      io.println_error("gekko shim init error: " <> err)
+      io.println_error("gekko shim patch error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
+fn run_shim_patch_module(root: String, module: String) -> Nil {
+  case shim_cli.patch_module(root, module) {
+    Error(err) -> {
+      io.println_error("gekko shim patch error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
+fn run_shim_migrate(root: String) -> Nil {
+  case shim_cli.migrate_shims(root) {
+    Error(err) -> {
+      io.println_error("gekko shim migrate error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
+fn run_shim_ack(root: String) -> Nil {
+  case shim_cli.ack_shims(root) {
+    Error(err) -> {
+      io.println_error("gekko shim ack error: " <> err)
       halt(1)
     }
     Ok(msg) -> io.println(msg)
@@ -969,17 +1207,21 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
         ["init", ..rest] -> parse_init_args(rest, ".", False)
         ["clean", ..rest] -> parse_clean_args(rest, ".")
         ["check", ..rest] -> {
+          let strict = list.contains(rest, "--strict")
+          let rest = list.filter(rest, fn(a) { a != "--strict" })
           use #(root, out, target) <- result.try(parse_flags(
             rest,
             ".",
             None,
             None,
           ))
-          Ok(CheckAction(root:, out:, target:))
+          Ok(CheckAction(root:, out:, target:, strict:))
         }
         ["build", ..rest] -> {
           let release = list.contains(rest, "--release")
-          let rest = list.filter(rest, fn(a) { a != "--release" })
+          let strict = list.contains(rest, "--strict")
+          let rest =
+            list.filter(rest, fn(a) { a != "--release" && a != "--strict" })
           use #(root, out, work_dir, target) <- result.try(parse_build_flags(
             rest,
             ".",
@@ -993,16 +1235,19 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
             work_dir:,
             target: option.unwrap(target, "wasm"),
             release:,
+            strict:,
           ))
         }
         ["test", ..rest] -> {
+          let strict = list.contains(rest, "--strict")
+          let rest = list.filter(rest, fn(a) { a != "--strict" })
           use #(root, out, target) <- result.try(parse_flags(
             rest,
             ".",
             None,
             None,
           ))
-          Ok(TestAction(root:, out:, target:))
+          Ok(TestAction(root:, out:, target:, strict:))
         }
         ["run", ..rest] -> {
           use #(root, out, target) <- result.try(parse_flags(
@@ -1057,31 +1302,48 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
           }
         }
         ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
+        ["shim", "new", ..rest] -> {
+          use #(root, pkg_opt, out) <- result.try(parse_shim_new_flags(
+            rest,
+            ".",
+            None,
+            None,
+          ))
+          case pkg_opt {
+            Some(pkg) -> Ok(ShimNewAction(root:, package: pkg, out:))
+            None -> Error("Expected `<pkg>` after `gekko shim new`")
+          }
+        }
+        ["shim", "init", ..rest] -> {
+          use root <- result.try(parse_shim_root_only_flags(rest, ".", "init"))
+          Ok(ShimInitAction(root:))
+        }
         ["shim", "inspect", ..rest] -> {
           use #(root, pkg_opt) <- result.try(parse_shim_inspect_flags(
             rest,
             ".",
             None,
           ))
-          case pkg_opt {
-            Some(pkg) -> Ok(ShimInspectAction(root:, package: pkg))
-            None -> Error("Expected `<pkg>` after `gekko shim inspect`")
-          }
+          Ok(ShimInspectAction(root:, package: pkg_opt))
         }
-        ["shim", "init", ..rest] -> {
-          use #(root, pkg_opt, out) <- result.try(parse_shim_init_flags(
+        ["shim", "patch", ..rest] ->
+          parse_shim_patch_flags(rest, ".", None, None)
+        ["shim", "migrate", ..rest] -> {
+          use root <- result.try(parse_shim_root_only_flags(
             rest,
             ".",
-            None,
-            None,
+            "migrate",
           ))
-          case pkg_opt {
-            Some(pkg) -> Ok(ShimInitAction(root:, package: pkg, out:))
-            None -> Error("Expected `<pkg>` after `gekko shim init`")
-          }
+          Ok(ShimMigrateAction(root:))
+        }
+        ["shim", "ack", ..rest] -> {
+          use root <- result.try(parse_shim_root_only_flags(rest, ".", "ack"))
+          Ok(ShimAckAction(root:))
         }
         ["shim", ..] ->
-          Error("Expected `gekko shim <inspect|init> <pkg> [flags]`")
+          Error(
+            "Expected `gekko shim <new|init|inspect|patch|migrate|ack> [flags]`",
+          )
         [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
       }
   }
@@ -1287,7 +1549,7 @@ fn parse_shim_inspect_flags(
   }
 }
 
-fn parse_shim_init_flags(
+fn parse_shim_new_flags(
   args: List(String),
   root: String,
   pkg: Option(String),
@@ -1295,13 +1557,68 @@ fn parse_shim_init_flags(
 ) -> Result(#(String, Option(String), Option(String)), String) {
   case args {
     [] -> Ok(#(root, pkg, out))
-    ["--root", val, ..rest] -> parse_shim_init_flags(rest, val, pkg, out)
+    ["--root", val, ..rest] -> parse_shim_new_flags(rest, val, pkg, out)
     ["--out", val, ..rest] | ["--output", val, ..rest] | ["-o", val, ..rest] ->
-      parse_shim_init_flags(rest, root, pkg, Some(val))
+      parse_shim_new_flags(rest, root, pkg, Some(val))
     [val, ..rest] ->
       case string.starts_with(val, "-"), pkg {
         True, _ -> Error("Unknown or incomplete flag: " <> val)
-        False, None -> parse_shim_init_flags(rest, root, Some(val), out)
+        False, None -> parse_shim_new_flags(rest, root, Some(val), out)
+        False, Some(_) -> Error("Unexpected argument: " <> val)
+      }
+  }
+}
+
+fn parse_shim_root_only_flags(
+  args: List(String),
+  root: String,
+  subcmd: String,
+) -> Result(String, String) {
+  case args {
+    [] -> Ok(root)
+    ["--root", val, ..rest] -> parse_shim_root_only_flags(rest, val, subcmd)
+    [val, ..] ->
+      case string.starts_with(val, "-") {
+        True -> Error("Unknown or incomplete flag: " <> val)
+        False ->
+          Error(
+            "Unexpected argument '"
+            <> val
+            <> "' for `gekko shim "
+            <> subcmd
+            <> "`",
+          )
+      }
+  }
+}
+
+fn parse_shim_patch_flags(
+  args: List(String),
+  root: String,
+  target: Option(String),
+  module: Option(String),
+) -> Result(CliAction, String) {
+  case args {
+    [] ->
+      case target, module {
+        Some(t), None -> Ok(ShimPatchDeclAction(root:, target: t))
+        None, Some(m) -> Ok(ShimPatchModuleAction(root:, module: m))
+        Some(_), Some(_) ->
+          Error(
+            "Specify either `<module>.<decl>` or `--module <module>`, not both",
+          )
+        None, None ->
+          Error(
+            "Expected `<module>.<decl>` or `--module <module>` after `gekko shim patch`",
+          )
+      }
+    ["--root", val, ..rest] -> parse_shim_patch_flags(rest, val, target, module)
+    ["--module", val, ..rest] ->
+      parse_shim_patch_flags(rest, root, target, Some(val))
+    [val, ..rest] ->
+      case string.starts_with(val, "-"), target {
+        True, _ -> Error("Unknown or incomplete flag: " <> val)
+        False, None -> parse_shim_patch_flags(rest, root, Some(val), module)
         False, Some(_) -> Error("Unexpected argument: " <> val)
       }
   }
@@ -1316,16 +1633,21 @@ fn print_usage() -> Nil {
     "  gekko init      [--root <dir>] [--wit]",
     "  gekko clean     [--root <dir>]",
     "  gekko doctor",
-    "  gekko check     [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
-    "  gekko build     [--release] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]",
-    "  gekko test      [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
+    "  gekko check     [--strict] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
+    "  gekko build     [--strict] [--release] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]",
+    "  gekko test      [--strict] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
     "  gekko run       [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]",
     "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
     "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",
     "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]",
-    "  gekko shim inspect <pkg> [--root <dir>]",
-    "  gekko shim init    <pkg> [--root <dir>] [--out <dir> | -o <dir>]",
+    "  gekko shim new     <pkg> [--root <dir>] [--out <dir> | -o <dir>]",
+    "  gekko shim init    [--root <dir>]",
+    "  gekko shim inspect [<pkg>] [--root <dir>]",
+    "  gekko shim patch   <module>.<decl> [--root <dir>]",
+    "  gekko shim patch   --module <module> [--root <dir>]",
+    "  gekko shim migrate [--root <dir>]",
+    "  gekko shim ack     [--root <dir>]",
     "  gekko --version | -V",
     "  gekko --help    | -h",
     "",

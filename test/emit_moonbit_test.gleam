@@ -28,9 +28,10 @@ pub fn prelude_runtime_matches_disk_files_test() {
 }
 
 pub fn pkg_config_generation_test() {
-  assert pkg_config.module_to_pkg_dir("app/auth/token") == "app_auth_token"
+  assert pkg_config.module_to_pkg_dir("app/auth/token") == "app/auth/token"
   assert pkg_config.module_to_pkg_dir("prelude") == "mod_prelude"
   assert pkg_config.module_to_pkg_dir("gprelude") == "mod_gprelude"
+  assert pkg_config.module_to_pkg_dir("gprelude/sub") == "mod_gprelude/sub"
 
   let mod_str = pkg_config.emit_moon_mod("demo", "0.2.0")
   assert string.contains(mod_str, "name = \"demo\"")
@@ -549,6 +550,7 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
           ],
           return_type: ir.IrTypeString,
           ffi: Some(prepass.PackageCall("custom_fmt", "show_any")),
+          external: True,
           body: [],
         ),
       ],
@@ -579,6 +581,7 @@ pub fn emit_guard_tuples_and_inspect_fn_test() {
           ],
           return_type: ir.IrTypeBool,
           ffi: None,
+          external: False,
           body: [
             ir.IrStmtGuard(
               value: match_expr,

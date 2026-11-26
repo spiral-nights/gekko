@@ -57,6 +57,39 @@ pub fn collect_module_origins(
   })
 }
 
+/// Build `DeclOrigin` entries mapping `__gekko_sigcheck_<fn>` stubs in a
+/// generated `.mbt` file back to the originating `#gekko.patch` line.
+pub fn collect_patch_sigcheck_origins(
+  mbt_rel_path: String,
+  mbt_source: String,
+  patch_fn_locs: Dict(String, #(String, Int)),
+) -> List(DeclOrigin) {
+  case dict.is_empty(patch_fn_locs) {
+    True -> []
+    False ->
+      split_mbt_blocks(mbt_source)
+      |> list.filter_map(fn(blk) {
+        let #(start_line, end_line, sym_opt) = blk
+        case sym_opt {
+          Some("__gekko_sigcheck_" <> fn_name) ->
+            case dict.get(patch_fn_locs, fn_name) {
+              Ok(#(patch_file, patch_line)) ->
+                Ok(DeclOrigin(
+                  mbt_file: mbt_rel_path,
+                  start_line:,
+                  end_line:,
+                  gleam_file: patch_file,
+                  gleam_line: patch_line,
+                  symbol: fn_name,
+                ))
+              Error(_) -> Error(Nil)
+            }
+          _ -> Error(Nil)
+        }
+      })
+  }
+}
+
 fn format_gleam_rel_path(
   root_pkg_name: String,
   pkg_name: String,
@@ -292,7 +325,11 @@ pub fn annotate_with_origins(
               case lookup_origin(origins, mbt_path, line_no) {
                 Some(origin) -> [
                   line,
-                  "  ↳ Gleam source: "
+                  "  ↳ "
+                    <> case string.ends_with(origin.gleam_file, ".mbt") {
+                    True -> "Patch source: "
+                    False -> "Gleam source: "
+                  }
                     <> origin.gleam_file
                     <> ":"
                     <> int.to_string(origin.gleam_line)

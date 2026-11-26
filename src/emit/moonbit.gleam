@@ -217,20 +217,21 @@ fn emit_constant(c: IrConstant, ctx: EmitCtx) -> #(String, EmitCtx) {
   }
 }
 
-fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
-  let f = case f.ffi {
-    Some(_) -> {
-      let named_params =
-        list.index_map(f.params, fn(p, idx) {
-          case p.name {
-            "_" -> IrParam(..p, name: "__arg_" <> int.to_string(idx))
-            _ -> p
-          }
-        })
-      ir.IrFunction(..f, params: named_params)
-    }
-    None -> f
-  }
+fn normalize_unnamed_params(f: IrFunction) -> IrFunction {
+  let named_params =
+    list.index_map(f.params, fn(p, idx) {
+      case p.name {
+        "_" -> IrParam(..p, name: "__arg_" <> int.to_string(idx))
+        _ -> p
+      }
+    })
+  ir.IrFunction(..f, params: named_params)
+}
+
+fn emit_function_header(
+  f: IrFunction,
+  ctx: EmitCtx,
+) -> #(String, String, String, EmitCtx) {
   let vis = visibility(f.publicity)
   let #(generics, ctx0) = format_function_type_params(f, ctx)
   let #(param_strs, ctx1) = map_acc(f.params, ctx0, emit_fn_param)
@@ -246,6 +247,30 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
     <> string.join(param_strs, ", ")
     <> ") -> "
     <> ret_str
+  #(header, generics, ret_str, ctx2)
+}
+
+/// Emit a `#gekko.patch` scaffold for `f` using its exact lowered MoonBit
+/// signature and an `abort("TODO")` body.
+pub fn emit_function_scaffold(
+  f: IrFunction,
+  ctx: EmitCtx,
+) -> #(String, EmitCtx) {
+  let f = normalize_unnamed_params(f)
+  let #(header, _, _, ctx2) = emit_function_header(f, ctx)
+  let attr = case f.name == f.unmangled_name {
+    True -> "#gekko.patch"
+    False -> "#gekko.patch(\"" <> f.unmangled_name <> "\")"
+  }
+  #("///|\n" <> attr <> "\n" <> header <> " {\n  abort(\"TODO\")\n}", ctx2)
+}
+
+fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
+  let f = case f.ffi {
+    Some(_) -> normalize_unnamed_params(f)
+    None -> f
+  }
+  let #(header, generics, ret_str, ctx2) = emit_function_header(f, ctx)
 
   let #(fn_block, ctx3) = case f.ffi {
     Some(PackageCall(pkg, target_fn)) -> {

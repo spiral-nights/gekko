@@ -54,17 +54,14 @@ pub fn golden_pure_gleam_e2e_test() {
     == Ok(True)
   assert simplifile.is_file(filepath.join(
       out_dir,
-      "pure_gleam_models/pure_gleam_models.mbt",
+      "pure_gleam/models/models.mbt",
     ))
+    == Ok(True)
+  assert simplifile.is_file(filepath.join(out_dir, "pure_gleam/math/math.mbt"))
     == Ok(True)
   assert simplifile.is_file(filepath.join(
       out_dir,
-      "pure_gleam_math/pure_gleam_math.mbt",
-    ))
-    == Ok(True)
-  assert simplifile.is_file(filepath.join(
-      out_dir,
-      "test_pure_gleam_test/test_pure_gleam_test.mbt",
+      "test/pure_gleam_test/pure_gleam_test.mbt",
     ))
     == Ok(True)
 
@@ -85,9 +82,9 @@ pub fn golden_pure_gleam_e2e_test() {
     filepath.join(fixture_dir, "expected"),
     [
       "pure_gleam/pure_gleam.mbt",
-      "pure_gleam_math/pure_gleam_math.mbt",
-      "pure_gleam_models/pure_gleam_models.mbt",
-      "test_pure_gleam_test/test_pure_gleam_test.mbt",
+      "pure_gleam/math/math.mbt",
+      "pure_gleam/models/models.mbt",
+      "test/pure_gleam_test/pure_gleam_test.mbt",
     ],
   )
 
@@ -157,10 +154,7 @@ pub fn golden_multi_pkg_deps_e2e_test() {
   assert list.contains(summary.emitted_modules, "mini_ffi/kv")
   assert simplifile.is_file(filepath.join(out_dir, "tiny_slug/tiny_slug.mbt"))
     == Ok(True)
-  assert simplifile.is_file(filepath.join(
-      out_dir,
-      "mini_ffi_kv/mini_ffi_kv.mbt",
-    ))
+  assert simplifile.is_file(filepath.join(out_dir, "mini_ffi/kv/kv.mbt"))
     == Ok(True)
   assert simplifile.is_file(filepath.join(
       out_dir,
@@ -169,7 +163,7 @@ pub fn golden_multi_pkg_deps_e2e_test() {
     == Ok(True)
   assert simplifile.is_file(filepath.join(
       out_dir,
-      "test_multi_pkg_deps_test/test_multi_pkg_deps_test.mbt",
+      "test/multi_pkg_deps_test/multi_pkg_deps_test.mbt",
     ))
     == Ok(True)
 
@@ -195,7 +189,7 @@ pub fn golden_multi_pkg_deps_e2e_test() {
     [
       "multi_pkg_deps/multi_pkg_deps.mbt",
       "tiny_slug/tiny_slug.mbt",
-      "test_multi_pkg_deps_test/test_multi_pkg_deps_test.mbt",
+      "test/multi_pkg_deps_test/multi_pkg_deps_test.mbt",
     ],
   )
 
@@ -628,6 +622,7 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: None,
       target: "native",
       release: False,
+      strict: False,
     ))
   assert gekko.parse_args(["build", "--release"])
     == Ok(gekko.BuildAction(
@@ -636,6 +631,7 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: None,
       target: "wasm",
       release: True,
+      strict: False,
     ))
   assert gekko.parse_args(["build"])
     == Ok(gekko.BuildAction(
@@ -644,6 +640,7 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: None,
       target: "wasm",
       release: False,
+      strict: False,
     ))
   assert gekko.parse_args(["build", "--out", "myfile.exe", "--target", "native"])
     == Ok(gekko.BuildAction(
@@ -652,6 +649,7 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: None,
       target: "native",
       release: False,
+      strict: False,
     ))
   assert gekko.parse_args(["build", "-o", "out.wasm"])
     == Ok(gekko.BuildAction(
@@ -660,6 +658,7 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: None,
       target: "wasm",
       release: False,
+      strict: False,
     ))
   assert gekko.parse_args([
       "build",
@@ -674,15 +673,23 @@ pub fn cli_parse_args_help_and_version_test() {
       work_dir: Some("tmp_mbt"),
       target: "native",
       release: False,
+      strict: False,
     ))
 
   // All subcommands default --root to "."
   assert gekko.parse_args(["check"])
-    == Ok(gekko.CheckAction(root: ".", out: None, target: None))
+    == Ok(gekko.CheckAction(root: ".", out: None, target: None, strict: False))
+  assert gekko.parse_args(["check", "--strict"])
+    == Ok(gekko.CheckAction(root: ".", out: None, target: None, strict: True))
   assert gekko.parse_args(["check", "--work-dir", "mbt_out"])
-    == Ok(gekko.CheckAction(root: ".", out: Some("mbt_out"), target: None))
+    == Ok(gekko.CheckAction(
+      root: ".",
+      out: Some("mbt_out"),
+      target: None,
+      strict: False,
+    ))
   assert gekko.parse_args(["test"])
-    == Ok(gekko.TestAction(root: ".", out: None, target: None))
+    == Ok(gekko.TestAction(root: ".", out: None, target: None, strict: False))
   assert gekko.parse_args(["run"])
     == Ok(gekko.RunAction(root: ".", out: None, target: None, program_args: []))
   assert gekko.parse_args([
@@ -740,15 +747,26 @@ pub fn cli_parse_args_help_and_version_test() {
       out: None,
     ))
   assert gekko.parse_args(["shim", "inspect", "simplifile", "--root", "app"])
-    == Ok(gekko.ShimInspectAction(root: "app", package: "simplifile"))
+    == Ok(gekko.ShimInspectAction(root: "app", package: Some("simplifile")))
+  assert gekko.parse_args(["shim", "inspect"])
+    == Ok(gekko.ShimInspectAction(root: ".", package: None))
   assert gekko.parse_args([
-      "shim", "init", "simplifile", "--root", "app", "-o", "out_shim",
+      "shim", "new", "simplifile", "--root", "app", "-o", "out_shim",
     ])
-    == Ok(gekko.ShimInitAction(
+    == Ok(gekko.ShimNewAction(
       root: "app",
       package: "simplifile",
       out: Some("out_shim"),
     ))
+  assert gekko.parse_args(["shim", "init", "--root", "shim_repo"])
+    == Ok(gekko.ShimInitAction(root: "shim_repo"))
+  assert gekko.parse_args(["shim", "patch", "gleam/dict.get"])
+    == Ok(gekko.ShimPatchDeclAction(root: ".", target: "gleam/dict.get"))
+  assert gekko.parse_args(["shim", "patch", "--module", "gleam/dict"])
+    == Ok(gekko.ShimPatchModuleAction(root: ".", module: "gleam/dict"))
+  assert gekko.parse_args(["shim", "migrate"])
+    == Ok(gekko.ShimMigrateAction(root: "."))
+  assert gekko.parse_args(["shim", "ack"]) == Ok(gekko.ShimAckAction(root: "."))
   assert gekko.parse_args(["shim", "--help"]) == Ok(gekko.HelpAction)
 
   // Parse `moon build` artifact lines
@@ -920,7 +938,7 @@ pub fn build_library_and_stale_test_cleanup_e2e_test() {
 
   let work_dir = filepath.join(root, "build/moonbit")
   let assert Ok(_) = workspace.transpile_project(root, work_dir)
-  assert simplifile.is_directory(filepath.join(work_dir, "test_lib_sample_test"))
+  assert simplifile.is_directory(filepath.join(work_dir, "test/lib_sample_test"))
     == Ok(True)
 
   // Now put an out-of-range test literal in test/ and run `build` (without `--out`)
@@ -932,7 +950,7 @@ pub fn build_library_and_stale_test_cleanup_e2e_test() {
 
   let assert Ok(gekko.BuiltLibrary(project_name: "build_lib_pkg", ..)) =
     gekko.build_project_in_dir(root, None, "wasm", out_cwd)
-  assert simplifile.is_directory(filepath.join(work_dir, "test_lib_sample_test"))
+  assert simplifile.is_directory(filepath.join(work_dir, "test/lib_sample_test"))
     == Ok(False)
 
   // Explicit `--out` on a library project without `pub fn main()` reports a clear error

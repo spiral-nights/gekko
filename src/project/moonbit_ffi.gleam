@@ -1,12 +1,45 @@
 import emit/pkg_config
 import filepath
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import project/fs
 import project/paths
 import simplifile
+
+/// Read `name = "..."` from a MoonBit `moon.mod` file if it exists.
+pub fn read_moon_mod_name(moon_mod_path: String) -> Option(String) {
+  case simplifile.read(from: moon_mod_path) {
+    Ok(content) ->
+      content
+      |> string.split("\n")
+      |> list.find_map(fn(raw_line) {
+        let line = string.trim(raw_line)
+        case string.starts_with(line, "name") {
+          False -> Error(Nil)
+          True ->
+            case string.split_once(line, "=") {
+              Ok(#(lhs, rhs)) if lhs == "name" || lhs == "name " -> {
+                let val = string.trim(rhs)
+                case string.starts_with(val, "\"") {
+                  False -> Error(Nil)
+                  True ->
+                    case string.split_once(string.drop_start(val, 1), "\"") {
+                      Ok(#(mod_name, _)) if mod_name != "" -> Ok(mod_name)
+                      _ -> Error(Nil)
+                    }
+                }
+              }
+              _ -> Error(Nil)
+            }
+        }
+      })
+      |> option.from_result
+    Error(_) -> None
+  }
+}
 
 /// Discover, validate, and copy local MoonBit FFI packages from
 /// `<project_root>/moonbit/` into `<out_dir>/`.
@@ -61,6 +94,8 @@ pub fn copy_local_packages_for_package_excluding(
   excluded_files: Set(String),
 ) -> Result(List(String), String) {
   let moonbit_root = filepath.join(pkg_root, "moonbit")
+  let moon_mod_name =
+    read_moon_mod_name(filepath.join(moonbit_root, "moon.mod"))
   case simplifile.is_directory(moonbit_root) {
     Ok(True) -> {
       use entries <- result.try(read_sorted_dir(moonbit_root))
@@ -71,6 +106,7 @@ pub fn copy_local_packages_for_package_excluding(
           entries,
           source_pkg_name,
           project_name,
+          moon_mod_name,
           out_dir,
           reserved_pkg_dirs,
           excluded_files,
@@ -124,16 +160,20 @@ fn walk_root_subdirs(
   entries: List(String),
   source_pkg_name: String,
   project_name: String,
+  moon_mod_name: Option(String),
   out_dir: String,
   reserved_pkg_dirs: Set(String),
   excluded_files: Set(String),
   acc: List(String),
 ) -> Result(List(String), String) {
   list.try_fold(entries, acc, fn(cur_acc, entry) {
-    case fs.is_ignored_entry(entry) {
+    let full_path = filepath.join(moonbit_root, entry)
+    case
+      fs.is_ignored_entry(entry)
+      || { entry == "gprelude" && fs.is_generated_gprelude_dir(full_path) }
+    {
       True -> Ok(cur_acc)
-      False -> {
-        let full_path = filepath.join(moonbit_root, entry)
+      False ->
         case simplifile.is_directory(full_path) {
           Ok(True) ->
             visit_package_dir(
@@ -141,6 +181,7 @@ fn walk_root_subdirs(
               entry,
               source_pkg_name,
               project_name,
+              moon_mod_name,
               out_dir,
               reserved_pkg_dirs,
               excluded_files,
@@ -148,7 +189,6 @@ fn walk_root_subdirs(
             )
           _ -> Ok(cur_acc)
         }
-      }
     }
   })
 }
@@ -158,6 +198,7 @@ fn visit_package_dir(
   rel_pkg: String,
   source_pkg_name: String,
   project_name: String,
+  moon_mod_name: Option(String),
   out_dir: String,
   reserved_pkg_dirs: Set(String),
   excluded_files: Set(String),
@@ -229,6 +270,7 @@ fn visit_package_dir(
                 dst_file,
                 source_pkg_name,
                 project_name,
+                moon_mod_name,
               )
             False -> fs.copy_if_changed(src_file, dst_file)
           }
@@ -259,6 +301,7 @@ fn visit_package_dir(
       rel_pkg <> "/" <> sub,
       source_pkg_name,
       project_name,
+      moon_mod_name,
       out_dir,
       reserved_pkg_dirs,
       excluded_files,
@@ -272,6 +315,7 @@ fn rewrite_and_copy_moon_pkg(
   dst: String,
   source_pkg_name: String,
   project_name: String,
+  moon_mod_name: Option(String),
 ) -> Result(Nil, String) {
   use content <- result.try(
     simplifile.read(from: src)
@@ -282,12 +326,18 @@ fn rewrite_and_copy_moon_pkg(
       <> simplifile.describe_error(err)
     }),
   )
-  let with_prelude =
-    string.replace(
-      content,
-      "\"gekko/gprelude\"",
-      "\"" <> project_name <> "/gprelude\"",
-    )
+  let target_prelude = "\"" <> project_name <> "/gprelude\""
+  let with_legacy_prelude =
+    string.replace(content, "\"gekko/gprelude\"", target_prelude)
+  let with_prelude = case moon_mod_name {
+    Some(m) if m != "" ->
+      string.replace(
+        with_legacy_prelude,
+        "\"" <> m <> "/gprelude\"",
+        target_prelude,
+      )
+    _ -> with_legacy_prelude
+  }
   let updated = case source_pkg_name == project_name {
     True -> with_prelude
     False ->

@@ -17,13 +17,12 @@ In MoonBit, every directory is a package, and MoonBit forbids circular package i
 
 ```text
 gekko_json/                # companion shim package
-├── gleam.toml             # [tools.gekko.shim_for] metadata + normal Gleam deps
+├── gleam.toml             # [tools.gekko.shim_for] + [tools.gekko.patches."..."] imports
 ├── src/
 │   └── gekko_json.gleam
 └── patches/               # co-located .mbt files mirroring upstream modules
     └── gleam/
         └── json/
-            ├── moon.pkg   # standard MoonBit imports for this patch
             └── json.mbt   # #gekko.patch-annotated MoonBit implementations
 ```
 
@@ -78,25 +77,25 @@ Supported SemVer constraint operators: `>=`, `<=`, `>`, `<`, `==`, `!=`, `~>`, `
 
 ### 2. `patches/` + `#gekko.patch` — Co-Located Module Patches *(Primary Mechanism)*
 
-`gekko` automatically discovers `.mbt` files under `<pkg_root>/patches/` in two layouts:
+`gekko` discovers `.mbt` files under `<pkg_root>/patches/<mod>/` (package-directory layout only; single-file `patches/<mod>.mbt` patches are retired — use `gekko shim migrate`).
 
-- **Package-directory layout (`patches/<mod>/moon.pkg` + `*.mbt`):** Used whenever a patch needs extra MoonBit imports. All direct `.mbt` files in that directory are copied into the transpiled module's package (`build/moonbit/<mod>/`), and `moon.pkg`'s `import { ... }` entries are merged automatically.
-- **Single-file layout (`patches/<mod>.mbt`):** Used when no extra imports beyond `@gprelude` and same-module types are needed.
+Running `gekko check`, `gekko build`, or `gekko test` mirrors the full MoonBit module graph into `patches/` (`patches/moon.mod`, `patches/gprelude/`, generated `patches/**/moon.pkg`, and generated `patches/**/*.g.mbt`) and writes `moon.work` at the project root so MoonBit LSP and `moon check` work directly inside `patches/`. Extra MoonBit imports for a patched module are declared in `gleam.toml`:
 
-Inside a patch `.mbt` file, annotate every patched type or function with `#gekko.patch`:
-
-```moonbit
-// patches/gleam/json/moon.pkg
-import {
+```toml
+[tools.gekko.patches."gleam/json"]
+imports = [
   "moonbitlang/core/json",
-  "moonbitlang/core/string" @str,
-}
+  "moonbitlang/core/string @str",
+]
 ```
+
+Inside `patches/<mod>/<file>.mbt`, annotate every patched type or function with `#gekko.patch`:
 
 ```moonbit
 // patches/gleam/json/json.mbt
 ///|
 #gekko.patch
+#derive(Eq, Debug)
 pub(all) struct Json {
   raw : @json.Json
 }
@@ -119,8 +118,8 @@ fn json_to_dynamic(j : @json.Json) -> @gprelude.Dynamic { ... }
 
 - **`#gekko.patch`:** Maps the MoonBit declaration to the same-named Gleam type, type alias, or function in the module. Annotating a MoonBit type alias (`pub type Dynamic = @gprelude.Dynamic` or `pub using @prelude { type Option }` for reserved built-ins) automatically maps the upstream Gleam type to that MoonBit target without TOML configuration.
 - **`#gekko.patch("gleam_name")`:** Maps to a different Gleam identifier (e.g. `#gekko.patch("println")` on `pub fn println_` when a Gleam name is a MoonBit keyword), or to an explicit `"mod.sym"` / `"pkg:mod.sym"` target.
-- **`imports` (`moon.pkg`):** `@gprelude` is imported automatically. Any package already imported by the upstream Gleam module is deduplicated automatically.
-- **Signature checks:** `gekko` emits zero-cost compile-time signature checks (`__gekko_sigcheck_<fn>`) so upstream type changes are caught immediately by `moon check`. Functions marked `pub` in Gleam must be `pub` in the `.mbt` patch file.
+- **`imports` (`[tools.gekko.patches."<mod>"]`):** `@gprelude` and upstream Gleam module imports are merged automatically into the generated `patches/<mod>/moon.pkg`.
+- **Guards:** Unmatched patches/overrides, visibility or arity mismatches, and upstream type drift (compared against `patches/.gekko_baseline/`) fail compilation with errors pointing at `patches/...:line`. Use `gekko check --strict` to fail on any unimplemented `@external` function.
 
 ---
 
@@ -171,18 +170,28 @@ Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[tools
 
 ## CLI Workflow (`gekko shim`)
 
-Use `gekko shim inspect` and `gekko shim init` to audit any Hex dependency and scaffold a typed companion shim:
+Use `gekko shim` to create, scaffold, inspect, migrate, and acknowledge companion shims:
 
 ```bash
-# 1. Inspect a resolved dependency for unmapped externals and opaque types
-gekko shim inspect simplifile
+# 1. Create a brand-new companion shim repository for a Hex dependency
+gekko shim new simplifile --out ../gekko_simplifile
 
-# 2. Scaffold a starter companion shim package (defaults to ./gekko_<pkg>)
-gekko shim init simplifile
-gekko shim init simplifile --out ../gekko_simplifile
+# 2. Inside a shim repository, scaffold all missing externals or one module/decl
+gekko shim init
+gekko shim patch --module simplifile
+gekko shim patch simplifile.read_bits
+
+# 3. Inspect patch coverage, unmatched entries, missing externals, and type drift
+gekko shim inspect
+
+# 4. Acknowledge reviewed upstream type changes in patches/.gekko_baseline/
+gekko shim ack
+
+# 5. Migrate legacy single-file patches & moon.pkg files into gleam.toml
+gekko shim migrate
 ```
 
-`gekko shim init` generates `gleam.toml` (with `[tools.gekko.shim_for]`) and `patches/<mod>/` (`moon.pkg` + `#gekko.patch`-annotated `.mbt` stubs matching upstream's exact lowered MoonBit signatures).
+`gekko shim patch` is additive and idempotent: it appends `#gekko.patch` stubs matching upstream's exact lowered MoonBit signatures without altering existing declarations.
 
 ---
 
@@ -191,6 +200,6 @@ gekko shim init simplifile --out ../gekko_simplifile
 1. **Override at the right boundary:**
    - For libraries with a small, stable `@external` leaf layer, patch the leaf `@external` functions so you inherit all upstream pure-Gleam logic and bugfixes automatically.
    - For libraries wrapping churning Erlang/JS internals behind a stable public API, patch at the **public SemVer API**—`gekko` automatically prunes unreachable private `@external` helpers.
-2. **Rely on MoonBit's type checker:** `gekko` emits `__gekko_sigcheck_<fn>` wrappers from upstream's `gleam export package-interface`. If an upstream upgrade changes a parameter, return type, or error variant, `moon check` catches it immediately at compile time.
-3. **Heed stale-override and version warnings:** When an upstream upgrade renames or removes an overridden function, type, or module, `gekko` warns about the unmatched key so dead shim code doesn't accumulate silently.
+2. **Rely on MoonBit's type checker & baselines:** `gekko` emits `__gekko_sigcheck_<fn>` wrappers (remapped back to `patches/...:line`) and checks `patches/.gekko_baseline/` against upstream `IrTypeDef`s. If an upstream upgrade changes a signature or type, `gekko check` / `moon check` catches it immediately.
+3. **Use `--strict` and `gekko shim inspect`:** `gekko check --strict` fails on any remaining `@external` function backed only by a `panic`/`todo` stub, and unmatched patch/override keys fail compilation immediately.
 4. **Test against upstream's test suite in CI:** Run `gekko test` against the upstream package's tests in your shim repository's CI so upstream upgrades are a version bump + `gekko test`.

@@ -94,6 +94,7 @@ pub type IrFunction {
     params: List(IrParam),
     return_type: IrType,
     ffi: Option(FfiKind),
+    external: Bool,
     body: List(IrStmt),
   )
 }

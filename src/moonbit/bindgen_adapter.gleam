@@ -1053,11 +1053,29 @@ pub fn emit_adapter_moon_pkg(
   needs_int16: Bool,
   extra_imports: Dict(String, String),
 ) -> String {
+  emit_adapter_moon_pkg_with_prelude(
+    bctx,
+    bctx.project_name <> "/gprelude",
+    needs_gprelude,
+    needs_float,
+    needs_int16,
+    extra_imports,
+  )
+}
+
+pub fn emit_adapter_moon_pkg_with_prelude(
+  bctx: BindContext,
+  gprelude_pkg: String,
+  needs_gprelude: Bool,
+  needs_float: Bool,
+  needs_int16: Bool,
+  extra_imports: Dict(String, String),
+) -> String {
   let base =
     dict.new()
     |> dict.insert(bctx.mbti.package_name, bctx.target_alias)
   let base = case needs_gprelude {
-    True -> dict.insert(base, "gekko/gprelude", "gprelude")
+    True -> dict.insert(base, gprelude_pkg, "gprelude")
     False -> base
   }
   let base = case needs_float {

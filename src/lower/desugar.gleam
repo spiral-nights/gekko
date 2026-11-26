@@ -200,16 +200,18 @@ fn lower_functions(
   let #(rev_fns, final_ctx) =
     list.fold(fn_defs, #([], ctx), fn(acc, def) {
       let #(fns, cur_ctx) = acc
-      let #(lowered_fn, next_ctx) = lower_function(def.definition, cur_ctx)
+      let #(lowered_fn, next_ctx) = lower_function(def, cur_ctx)
       #([lowered_fn, ..fns], next_ctx)
     })
   #(list.reverse(rev_fns), final_ctx)
 }
 
 fn lower_function(
-  func: glance.Function,
+  def: glance.Definition(glance.Function),
   ctx: LowerCtx,
 ) -> #(IrFunction, LowerCtx) {
+  let func = def.definition
+  let external = list.any(def.attributes, fn(a) { a.name == "external" })
   let maybe_fn_info = dict.get(ctx.mod_syms.functions, func.name)
 
   let params =
@@ -348,6 +350,7 @@ fn lower_function(
       params:,
       return_type:,
       ffi:,
+      external:,
       body:,
     )
   #(lowered, LowerCtx(..ctx, next_id: after_body_ctx.next_id))

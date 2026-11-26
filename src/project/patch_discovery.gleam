@@ -26,6 +26,20 @@ pub type DiscoveredPatchAttr {
     target_override: Option(String),
     type_alias: Option(#(String, String)),
     line: Int,
+    is_pub: Bool,
+    param_count: Option(Int),
+  )
+}
+
+/// Source location and signature summary of a `#gekko.patch` declaration.
+pub type PatchDeclLoc {
+  PatchDeclLoc(
+    file_path: String,
+    line: Int,
+    mbt_name: String,
+    gleam_name: String,
+    is_pub: Bool,
+    param_count: Option(Int),
   )
 }
 
@@ -51,6 +65,7 @@ pub type DiscoveredModulePatch {
     types: List(String),
     type_aliases: List(#(String, #(String, String))),
     functions: List(String),
+    decl_locs: List(PatchDeclLoc),
   )
 }
 
@@ -168,6 +183,66 @@ pub fn parse_mbt_patch_attributes(
 ) -> Result(List(DiscoveredPatchAttr), String) {
   let lines = string.split(content, "\n")
   scan_mbt_lines(lines, 1, 0, False, None, [], file_path)
+}
+
+/// Collect top-level declaration names (`fn`, `struct`, `enum`, `type`,
+/// `suberror`, `using`) that are NOT preceded by `#gekko.patch`.
+pub fn collect_unpatched_decl_names(content: String) -> List(String) {
+  let lines = string.split(content, "\n")
+  scan_unpatched_decls(lines, 0, False, False, [])
+}
+
+fn scan_unpatched_decls(
+  lines: List(String),
+  brace_depth: Int,
+  in_string: Bool,
+  has_patch_attr: Bool,
+  rev_acc: List(String),
+) -> List(String) {
+  case lines {
+    [] -> list.reverse(rev_acc)
+    [raw_line, ..rest] -> {
+      let trimmed = string.trim(raw_line)
+      case in_string || brace_depth != 0 {
+        True -> {
+          let #(nd, ns) = step_code_state(raw_line, brace_depth, in_string)
+          scan_unpatched_decls(rest, nd, ns, has_patch_attr, rev_acc)
+        }
+        False ->
+          case is_skippable_top_line(trimmed) {
+            True ->
+              scan_unpatched_decls(rest, 0, False, has_patch_attr, rev_acc)
+            False ->
+              case string.starts_with(trimmed, "#gekko.") {
+                True -> scan_unpatched_decls(rest, 0, False, True, rev_acc)
+                False ->
+                  case string.starts_with(trimmed, "#") {
+                    True ->
+                      scan_unpatched_decls(
+                        rest,
+                        0,
+                        False,
+                        has_patch_attr,
+                        rev_acc,
+                      )
+                    False -> {
+                      let next_acc = case has_patch_attr {
+                        True -> rev_acc
+                        False ->
+                          case parse_decl_header([raw_line, ..rest], "", 1) {
+                            Ok(#(_, name, _, _, _)) -> [name, ..rev_acc]
+                            Error(_) -> rev_acc
+                          }
+                      }
+                      let #(nd, ns) = step_code_state(raw_line, 0, False)
+                      scan_unpatched_decls(rest, nd, ns, False, next_acc)
+                    }
+                  }
+              }
+          }
+      }
+    }
+  }
 }
 
 fn scan_mbt_lines(
@@ -292,13 +367,19 @@ fn scan_mbt_lines(
                               )
                             }
                             Some(p) -> {
-                              use #(kind, mbt_name, type_alias) <- result.try(
-                                parse_decl_header(
-                                  [raw_line, ..rest],
-                                  file_path,
-                                  p.line,
-                                ),
-                              )
+                              use
+                                #(
+                                  kind,
+                                  mbt_name,
+                                  type_alias,
+                                  is_pub,
+                                  param_count,
+                                )
+                              <- result.try(parse_decl_header(
+                                [raw_line, ..rest],
+                                file_path,
+                                p.line,
+                              ))
                               let attr =
                                 DiscoveredPatchAttr(
                                   kind:,
@@ -306,6 +387,8 @@ fn scan_mbt_lines(
                                   target_override: p.target_override,
                                   type_alias:,
                                   line: p.line,
+                                  is_pub:,
+                                  param_count:,
                                 )
                               let #(next_depth, next_str) =
                                 step_code_state(raw_line, 0, False)
@@ -412,13 +495,21 @@ fn parse_decl_header(
   remaining_lines: List(String),
   file_path: String,
   attr_line: Int,
-) -> Result(#(PatchDeclKind, String, Option(#(String, String))), String) {
+) -> Result(
+  #(PatchDeclKind, String, Option(#(String, String)), Bool, Option(Int)),
+  String,
+) {
   let loc = file_path <> ":" <> int.to_string(attr_line)
   let joined =
     remaining_lines
-    |> list.take(8)
+    |> list.take(24)
+    |> list.map(moonbit_lex.strip_line_comment)
     |> string.join(" ")
     |> string.trim
+  let is_pub =
+    string.starts_with(joined, "pub ")
+    || string.starts_with(joined, "pub\t")
+    || string.starts_with(joined, "pub(")
   let after_vis = text_edit.strip_visibility_prefix(joined)
   case
     string.starts_with(after_vis, "fn["),
@@ -436,7 +527,7 @@ fn parse_decl_header(
           <> " has malformed generic parameter list on fn declaration"
         }),
       )
-      let #(name, _) = read_ident(string.trim(after_generics))
+      let #(name, after_name) = read_ident(string.trim(after_generics))
       case name {
         "" ->
           Error(
@@ -444,12 +535,19 @@ fn parse_decl_header(
             <> loc
             <> " must precede a named fn, struct, enum, or type declaration",
           )
-        _ -> Ok(#(PatchFn, name, None))
+        _ ->
+          Ok(#(
+            PatchFn,
+            name,
+            None,
+            is_pub,
+            parse_fn_param_count(string.trim(after_name)),
+          ))
       }
     }
     _, True, _, _ | _, _, True, _ -> {
       let after_fn = string.trim(string.drop_start(after_vis, 2))
-      let #(name, _) = read_ident(after_fn)
+      let #(name, after_name) = read_ident(after_fn)
       case name {
         "" ->
           Error(
@@ -457,10 +555,23 @@ fn parse_decl_header(
             <> loc
             <> " must precede a named fn, struct, enum, or type declaration",
           )
-        _ -> Ok(#(PatchFn, name, None))
+        _ ->
+          Ok(#(
+            PatchFn,
+            name,
+            None,
+            is_pub,
+            parse_fn_param_count(string.trim(after_name)),
+          ))
       }
     }
-    _, _, _, Some(#("using", rest)) -> parse_using_type_alias(rest, loc)
+    _, _, _, Some(#("using", rest)) -> {
+      use #(kind, name, alias_opt) <- result.try(parse_using_type_alias(
+        rest,
+        loc,
+      ))
+      Ok(#(kind, name, alias_opt, is_pub, None))
+    }
     _, _, _, Some(#(kw, rest)) -> {
       let trimmed_rest = string.trim(rest)
       let #(name, after_name) = read_ident(trimmed_rest)
@@ -476,7 +587,7 @@ fn parse_decl_header(
             "type" -> parse_type_alias_rhs(after_name)
             _ -> None
           }
-          Ok(#(PatchType, name, alias_opt))
+          Ok(#(PatchType, name, alias_opt, is_pub, None))
         }
       }
     }
@@ -486,6 +597,217 @@ fn parse_decl_header(
         <> loc
         <> " must precede a fn, struct, enum, or type declaration",
       )
+  }
+}
+
+fn parse_fn_param_count(after_name: String) -> Option(Int) {
+  case string.starts_with(after_name, "(") {
+    False -> None
+    True ->
+      count_fn_params_loop(
+        string.to_graphemes(string.drop_start(after_name, 1)),
+        1,
+        0,
+        0,
+        False,
+        False,
+        0,
+        False,
+      )
+  }
+}
+
+fn count_fn_params_loop(
+  chars: List(String),
+  paren_depth: Int,
+  bracket_depth: Int,
+  brace_depth: Int,
+  in_string: Bool,
+  escaped: Bool,
+  count: Int,
+  saw_non_ws: Bool,
+) -> Option(Int) {
+  case chars {
+    [] -> None
+    [ch, ..rest] ->
+      case in_string {
+        True ->
+          case escaped {
+            True ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth,
+                True,
+                False,
+                count,
+                True,
+              )
+            False ->
+              case ch {
+                "\\" ->
+                  count_fn_params_loop(
+                    rest,
+                    paren_depth,
+                    bracket_depth,
+                    brace_depth,
+                    True,
+                    True,
+                    count,
+                    True,
+                  )
+                "\"" ->
+                  count_fn_params_loop(
+                    rest,
+                    paren_depth,
+                    bracket_depth,
+                    brace_depth,
+                    False,
+                    False,
+                    count,
+                    True,
+                  )
+                _ ->
+                  count_fn_params_loop(
+                    rest,
+                    paren_depth,
+                    bracket_depth,
+                    brace_depth,
+                    True,
+                    False,
+                    count,
+                    True,
+                  )
+              }
+          }
+        False ->
+          case ch {
+            "\"" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth,
+                True,
+                False,
+                count,
+                True,
+              )
+            "(" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth + 1,
+                bracket_depth,
+                brace_depth,
+                False,
+                False,
+                count,
+                True,
+              )
+            ")" ->
+              case paren_depth == 1 && bracket_depth == 0 && brace_depth == 0 {
+                True ->
+                  case saw_non_ws {
+                    False -> Some(count)
+                    True -> Some(count + 1)
+                  }
+                False ->
+                  count_fn_params_loop(
+                    rest,
+                    int.max(0, paren_depth - 1),
+                    bracket_depth,
+                    brace_depth,
+                    False,
+                    False,
+                    count,
+                    True,
+                  )
+              }
+            "[" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth + 1,
+                brace_depth,
+                False,
+                False,
+                count,
+                True,
+              )
+            "]" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                int.max(0, bracket_depth - 1),
+                brace_depth,
+                False,
+                False,
+                count,
+                True,
+              )
+            "{" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth + 1,
+                False,
+                False,
+                count,
+                True,
+              )
+            "}" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                int.max(0, brace_depth - 1),
+                False,
+                False,
+                count,
+                True,
+              )
+            "," if paren_depth == 1 && bracket_depth == 0 && brace_depth == 0 -> {
+              let next_count = case saw_non_ws {
+                True -> count + 1
+                False -> count
+              }
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth,
+                False,
+                False,
+                next_count,
+                False,
+              )
+            }
+            " " | "\t" | "\r" | "\n" ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth,
+                False,
+                False,
+                count,
+                saw_non_ws,
+              )
+            _ ->
+              count_fn_params_loop(
+                rest,
+                paren_depth,
+                bracket_depth,
+                brace_depth,
+                False,
+                False,
+                count,
+                True,
+              )
+          }
+      }
   }
 }
 
@@ -680,8 +1002,18 @@ fn walk_patches_dir(
       <> simplifile.describe_error(err)
     }),
   )
-  let visible = list.filter(entries, fn(e) { !fs.is_ignored_entry(e) })
-  let has_moon_pkg = list.contains(visible, "moon.pkg")
+  let visible =
+    list.filter(entries, fn(e) {
+      !fs.is_ignored_entry(e)
+      && case rel_dir == "" {
+        True -> e != "gprelude" && e != "moon.mod" && e != "moon.lock"
+        False -> True
+      }
+    })
+  let moon_pkg_path = filepath.join(dir, "moon.pkg")
+  let has_user_moon_pkg =
+    list.contains(visible, "moon.pkg")
+    && !fs.has_generated_marker(moon_pkg_path)
 
   let #(mbt_files, subdirs) =
     list.fold(visible, #([], []), fn(parts, entry) {
@@ -690,7 +1022,10 @@ fn walk_patches_dir(
       case simplifile.is_directory(full) {
         Ok(True) -> #(m_acc, [entry, ..d_acc])
         _ ->
-          case string.ends_with(entry, ".mbt") {
+          case
+            string.ends_with(entry, ".mbt")
+            && !string.ends_with(entry, ".g.mbt")
+          {
             True -> #([entry, ..m_acc], d_acc)
             False -> parts
           }
@@ -699,42 +1034,39 @@ fn walk_patches_dir(
   let mbt_files = list.reverse(mbt_files)
   let subdirs = list.reverse(subdirs)
 
-  use acc_after_files <- result.try(case has_moon_pkg {
-    True ->
-      case mbt_files, rel_dir {
-        [], _ -> Ok(acc)
-        _, "" ->
+  use acc_after_files <- result.try(case mbt_files, rel_dir {
+    [], "" ->
+      case has_user_moon_pkg {
+        True ->
           Error(
-            "Found moon.pkg directly in patches/; place package-directory patches in patches/<module>/moon.pkg",
+            "Found moon.pkg directly in patches/; place package-directory patches in patches/<module>/",
           )
-        _, _ ->
-          discover_pkg_dir_patch(
-            dir,
-            rel_dir,
-            mbt_files,
-            pkg_name,
-            target_pkg,
-            toml_patched_paths,
-            acc,
-          )
+        False -> Ok(acc)
       }
-    False ->
-      list.try_fold(mbt_files, acc, fn(cur_acc, file) {
-        let stem = string.drop_end(file, 4)
-        let default_mod = case rel_dir {
-          "" -> stem
-          _ -> rel_dir <> "/" <> stem
-        }
-        discover_single_file_patch(
-          filepath.join(dir, file),
-          file,
-          default_mod,
-          pkg_name,
-          target_pkg,
-          toml_patched_paths,
-          cur_acc,
-        )
-      })
+    [first_file, ..], "" -> {
+      let stem = string.drop_end(first_file, 4)
+      Error(
+        "Single-file patch '"
+        <> first_file
+        <> "' is no longer supported; move it to 'patches/"
+        <> stem
+        <> "/"
+        <> first_file
+        <> "' (or run 'gekko shim migrate')",
+      )
+    }
+    [], _ -> Ok(acc)
+    _, _ ->
+      discover_pkg_dir_patch(
+        dir,
+        rel_dir,
+        mbt_files,
+        has_user_moon_pkg,
+        pkg_name,
+        target_pkg,
+        toml_patched_paths,
+        acc,
+      )
   })
 
   list.try_fold(subdirs, acc_after_files, fn(cur_acc, sub) {
@@ -757,22 +1089,28 @@ fn discover_pkg_dir_patch(
   dir: String,
   default_mod: String,
   mbt_files: List(String),
+  has_user_moon_pkg: Bool,
   pkg_name: String,
   target_pkg: Option(String),
   toml_patched_paths: Set(String),
   acc: Dict(String, DiscoveredModulePatch),
 ) -> Result(Dict(String, DiscoveredModulePatch), String) {
-  let moon_pkg_path = filepath.join(dir, "moon.pkg")
-  use pkg_src <- result.try(
-    simplifile.read(moon_pkg_path)
-    |> result.map_error(fn(err) {
-      "Failed to read "
-      <> moon_pkg_path
-      <> ": "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  use imports <- result.try(parse_moon_pkg_imports(pkg_src, pkg_name))
+  use imports <- result.try(case has_user_moon_pkg {
+    False -> Ok([])
+    True -> {
+      let moon_pkg_path = filepath.join(dir, "moon.pkg")
+      use pkg_src <- result.try(
+        simplifile.read(moon_pkg_path)
+        |> result.map_error(fn(err) {
+          "Failed to read "
+          <> moon_pkg_path
+          <> ": "
+          <> simplifile.describe_error(err)
+        }),
+      )
+      parse_moon_pkg_imports(pkg_src, pkg_name)
+    }
+  })
 
   use #(patch_files, attrs, all_in_toml) <- result.try(
     list.try_fold(mbt_files, #([], [], True), fn(state, file) {
@@ -789,6 +1127,7 @@ fn discover_pkg_dir_patch(
         }),
       )
       use file_attrs <- result.try(parse_mbt_patch_attributes(src, canon))
+      let tagged_attrs = list.map(file_attrs, fn(a) { #(canon, a) })
       let pfile =
         DiscoveredPatchFile(
           source_path: canon,
@@ -797,7 +1136,7 @@ fn discover_pkg_dir_patch(
         )
       Ok(#(
         [pfile, ..f_acc],
-        list.append(a_acc, file_attrs),
+        list.append(a_acc, tagged_attrs),
         toml_ok && set.contains(toml_patched_paths, canon),
       ))
     }),
@@ -826,6 +1165,7 @@ fn discover_pkg_dir_patch(
               types: [],
               type_aliases: [],
               functions: [],
+              decl_locs: [],
             ),
           ))
         }
@@ -838,8 +1178,8 @@ fn discover_pkg_dir_patch(
         imports,
       ))
       Ok(
-        dict.fold(by_mod, acc, fn(m, mod_key, triple) {
-          let #(types, type_aliases, functions) = triple
+        dict.fold(by_mod, acc, fn(m, mod_key, tuple) {
+          let #(types, type_aliases, functions, decl_locs) = tuple
           merge_discovered_patch(
             m,
             mod_key,
@@ -849,64 +1189,7 @@ fn discover_pkg_dir_patch(
               types:,
               type_aliases:,
               functions:,
-            ),
-          )
-        }),
-      )
-    }
-  }
-}
-
-fn discover_single_file_patch(
-  file_path: String,
-  filename: String,
-  default_mod: String,
-  pkg_name: String,
-  target_pkg: Option(String),
-  toml_patched_paths: Set(String),
-  acc: Dict(String, DiscoveredModulePatch),
-) -> Result(Dict(String, DiscoveredModulePatch), String) {
-  let canon = paths.absolute(file_path)
-  use src <- result.try(
-    simplifile.read(canon)
-    |> result.map_error(fn(err) {
-      "Failed to read patch file "
-      <> canon
-      <> ": "
-      <> simplifile.describe_error(err)
-    }),
-  )
-  use attrs <- result.try(parse_mbt_patch_attributes(src, canon))
-  case attrs, set.contains(toml_patched_paths, canon) {
-    [], False ->
-      Error(
-        "Patch file '"
-        <> canon
-        <> "' has no #gekko.patch attributes; annotate patched declarations with #gekko.patch",
-      )
-    [], True -> Ok(acc)
-    _, _ -> {
-      let pfile =
-        DiscoveredPatchFile(
-          source_path: canon,
-          dest_filename: filename,
-          source_pkg: pkg_name,
-        )
-      use by_mod <- result.try(
-        group_attrs_by_module(attrs, default_mod, target_pkg, []),
-      )
-      Ok(
-        dict.fold(by_mod, acc, fn(m, mod_key, triple) {
-          let #(types, type_aliases, functions) = triple
-          merge_discovered_patch(
-            m,
-            mod_key,
-            DiscoveredModulePatch(
-              files: [pfile],
-              imports: [],
-              types:,
-              type_aliases:,
-              functions:,
+              decl_locs:,
             ),
           )
         }),
@@ -916,29 +1199,44 @@ fn discover_single_file_patch(
 }
 
 fn group_attrs_by_module(
-  attrs: List(DiscoveredPatchAttr),
+  attrs: List(#(String, DiscoveredPatchAttr)),
   default_mod: String,
   target_pkg: Option(String),
   imports: List(DiscoveredImport),
 ) -> Result(
   Dict(
     String,
-    #(List(String), List(#(String, #(String, String))), List(String)),
+    #(
+      List(String),
+      List(#(String, #(String, String))),
+      List(String),
+      List(PatchDeclLoc),
+    ),
   ),
   String,
 ) {
   let alias_to_pkg = build_import_alias_map(imports)
-  list.try_fold(attrs, dict.new(), fn(acc, attr) {
+  list.try_fold(attrs, dict.new(), fn(acc, entry) {
+    let #(file_path, attr) = entry
     use #(mod_key, sym_name) <- result.try(resolve_attr_target(
       attr,
       default_mod,
       target_pkg,
     ))
-    let #(tys, aliases, fns) = case dict.get(acc, mod_key) {
+    let #(tys, aliases, fns, locs) = case dict.get(acc, mod_key) {
       Ok(existing) -> existing
-      Error(_) -> #([], [], [])
+      Error(_) -> #([], [], [], [])
     }
-    let next_triple = case attr.kind, attr.type_alias {
+    let decl_loc =
+      PatchDeclLoc(
+        file_path:,
+        line: attr.line,
+        mbt_name: attr.mbt_name,
+        gleam_name: sym_name,
+        is_pub: attr.is_pub,
+        param_count: attr.param_count,
+      )
+    let next_tuple = case attr.kind, attr.type_alias {
       PatchType, Some(#(raw_pkg, target_ty)) -> {
         let resolved_pkg = case dict.get(alias_to_pkg, raw_pkg) {
           Ok(full_pkg) -> full_pkg
@@ -948,12 +1246,23 @@ fn group_attrs_by_module(
           tys,
           list.append(aliases, [#(sym_name, #(resolved_pkg, target_ty))]),
           fns,
+          list.append(locs, [decl_loc]),
         )
       }
-      PatchType, None -> #(list.append(tys, [sym_name]), aliases, fns)
-      PatchFn, _ -> #(tys, aliases, list.append(fns, [sym_name]))
+      PatchType, None -> #(
+        list.append(tys, [sym_name]),
+        aliases,
+        fns,
+        list.append(locs, [decl_loc]),
+      )
+      PatchFn, _ -> #(
+        tys,
+        aliases,
+        list.append(fns, [sym_name]),
+        list.append(locs, [decl_loc]),
+      )
     }
-    Ok(dict.insert(acc, mod_key, next_triple))
+    Ok(dict.insert(acc, mod_key, next_tuple))
   })
 }
 
@@ -1052,6 +1361,7 @@ fn merge_discovered_patch(
             patch.type_aliases,
           )),
           functions: dedup(list.append(existing.functions, patch.functions)),
+          decl_locs: dedup(list.append(existing.decl_locs, patch.decl_locs)),
         ),
       )
   }

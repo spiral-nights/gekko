@@ -136,15 +136,17 @@ fn scan_moonbit_root(
     Error(_) -> meta
     Ok(entries) ->
       list.fold(entries, meta, fn(acc, entry) {
-        case fs.is_ignored_entry(entry) {
+        let full_path = filepath.join(moonbit_root, entry)
+        case
+          fs.is_ignored_entry(entry)
+          || { entry == "gprelude" && fs.is_generated_gprelude_dir(full_path) }
+        {
           True -> acc
-          False -> {
-            let full_path = filepath.join(moonbit_root, entry)
+          False ->
             case simplifile.is_directory(full_path) {
               Ok(True) -> visit_pkg_dir(acc, full_path, entry, excluded_files)
               _ -> acc
             }
-          }
         }
       })
   }

@@ -87,64 +87,104 @@ pub fn load_project_context(
   ))
 }
 
+/// Make sure the `build/packages` directory exists so that dependency
+/// discovery has something to walk.
+///
+/// Gleam normally populates that directory when it fetches dependencies. If it
+/// is missing, this looks at the manifest for any dependency that is *not*
+/// declared as a local `path` dependency (i.e. one that must come from Hex) and
+/// runs `gleam deps download` to fetch it. All failures to read or parse the
+/// manifest are treated as "nothing to do": the caller will report the real
+/// error later, and this helper should not mask it.
 fn ensure_deps_downloaded(
   project_root: String,
   include_tests: Bool,
 ) -> Result(Nil, String) {
   let packages_dir = filepath.join(project_root, "build/packages")
+
+  // Dependencies are already fetched: nothing to check.
   case simplifile.is_directory(packages_dir) {
     Ok(True) -> Ok(Nil)
-    _ -> {
-      let toml_path = filepath.join(project_root, "gleam.toml")
-      case simplifile.read(toml_path) {
+    _ -> fetch_missing_dependencies(project_root, include_tests)
+  }
+}
+
+fn fetch_missing_dependencies(
+  project_root: String,
+  include_tests: Bool,
+) -> Result(Nil, String) {
+  let manifest_path = filepath.join(project_root, "gleam.toml")
+
+  // A missing or unparsable manifest is not an error here; discovery and
+  // overlays will report it with a useful message.
+  case simplifile.read(manifest_path) {
+    Error(_) -> Ok(Nil)
+    Ok(content) ->
+      case tom.parse(content) {
         Error(_) -> Ok(Nil)
-        Ok(content) ->
-          case tom.parse(content) {
-            Error(_) -> Ok(Nil)
-            Ok(parsed) -> {
-              let has_remote_in = fn(section) {
-                case tom.get_table(parsed, [section]) {
-                  Error(_) -> False
-                  Ok(tbl) ->
-                    dict.values(tbl)
-                    |> list.any(fn(val) {
-                      case val {
-                        tom.InlineTable(dep_tbl) | tom.Table(dep_tbl) ->
-                          case tom.get_string(dep_tbl, ["path"]) {
-                            Ok(_) -> False
-                            Error(_) -> True
-                          }
-                        _ -> True
-                      }
-                    })
-                }
-              }
-              let needs_download =
-                has_remote_in("dependencies")
-                || { include_tests && has_remote_in("dev-dependencies") }
-              case needs_download {
-                False -> Ok(Nil)
-                True -> {
-                  let res =
-                    cmd.run(
-                      command: "gleam",
-                      args: ["deps", "download"],
-                      cwd: project_root,
-                    )
-                  case res.exit_code {
-                    0 -> Ok(Nil)
-                    _ ->
-                      Error(
-                        "`gleam deps download` failed while fetching missing dependencies:\n"
-                        <> res.output,
-                      )
-                  }
-                }
-              }
-            }
-          }
+        Ok(parsed_manifest) ->
+          download_if_any_remote(parsed_manifest, project_root, include_tests)
       }
+  }
+}
+
+fn download_if_any_remote(
+  parsed_manifest: Dict(String, tom.Toml),
+  project_root: String,
+  include_tests: Bool,
+) -> Result(Nil, String) {
+  let needs_download =
+    section_has_remote_dependency(parsed_manifest, "dependencies")
+    || {
+      include_tests
+      && section_has_remote_dependency(parsed_manifest, "dev-dependencies")
     }
+
+  case needs_download {
+    False -> Ok(Nil)
+    True -> run_deps_download(project_root)
+  }
+}
+
+/// True when at least one entry in `section_name` lacks a `path` key, meaning
+/// it has to be fetched from a package registry rather than read from disk.
+fn section_has_remote_dependency(
+  parsed_manifest: Dict(String, tom.Toml),
+  section_name: String,
+) -> Bool {
+  case tom.get_table(parsed_manifest, [section_name]) {
+    Error(_) -> False
+    Ok(section_entries) ->
+      section_entries
+      |> dict.values
+      |> list.any(is_remote_dependency)
+  }
+}
+
+/// A dependency is local only when it is a table carrying a `path` string.
+/// Bare strings (a version constraint) and tables without `path` are remote.
+fn is_remote_dependency(entry: tom.Toml) -> Bool {
+  case entry {
+    tom.InlineTable(spec) | tom.Table(spec) ->
+      case tom.get_string(spec, ["path"]) {
+        Ok(_) -> False
+        Error(_) -> True
+      }
+    _ -> True
+  }
+}
+
+fn run_deps_download(project_root: String) -> Result(Nil, String) {
+  let download =
+    cmd.run(command: "gleam", args: ["deps", "download"], cwd: project_root)
+
+  case download.exit_code {
+    0 -> Ok(Nil)
+    _ ->
+      Error(
+        "`gleam deps download` failed while fetching missing dependencies:\n"
+        <> download.output,
+      )
   }
 }
 

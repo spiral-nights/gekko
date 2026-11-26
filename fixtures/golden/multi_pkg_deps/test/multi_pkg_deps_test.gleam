@@ -23,8 +23,7 @@ pub fn kv_upsert_and_fold_test() {
   assert kv.get(from: counts, get: "a") == Ok(3)
   assert kv.get(from: counts, get: "b") == Ok(1)
   assert kv.get(from: counts, get: "missing") == Error(Nil)
-  let sum =
-    kv.fold(over: counts, from: 0, with: fn(acc, _k, v) { acc + v })
+  let sum = kv.fold(over: counts, from: 0, with: fn(acc, _k, v) { acc + v })
   assert sum == 5
 }
 

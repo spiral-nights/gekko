@@ -9,7 +9,11 @@ pub fn new() -> MiniMap(k, v) {
 }
 
 /// @external(moonbit, "mini_ffi_mbt", "map_insert")
-pub fn insert(into map: MiniMap(k, v), for key: k, insert value: v) -> MiniMap(k, v) {
+pub fn insert(
+  into map: MiniMap(k, v),
+  for key: k,
+  insert value: v,
+) -> MiniMap(k, v) {
   let _ = #(map, key, value)
   panic as "Implemented in MoonBit"
 }

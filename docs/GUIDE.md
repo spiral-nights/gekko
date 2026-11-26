@@ -208,9 +208,9 @@ To enable full MoonBit LSP autocomplete, type checking, and hover docs inside `m
 
 ---
 
-## 4. Writing a Companion Shim for a Hex Package
+## 4. Writing a Shim for a Hex Package
 
-Companion shims let you compile **unmodified upstream Hex packages** that contain `@external(erlang, ...)` / `@external(javascript, ...)` functions without forking them.
+Companion shims and local Gleam patches let you compile **unmodified upstream Hex packages** that contain `@external(erlang, ...)` / `@external(javascript, ...)` functions without forking them.
 
 ### Step 1: Inspect the Dependency
 
@@ -220,33 +220,49 @@ Inside a project that depends on the Hex package (after `gleam deps download`):
 gekko shim inspect simplifile
 ```
 
-`gekko` lists every unmapped `@external` function (with its exact lowered MoonBit signature) and every opaque external type.
+`gekko` lists every unmapped `@external` function and every opaque external type.
 
-### Step 2: Scaffold the Shim Package
+### Step 2: Scaffold Gleam Shims (Recommended)
+
+By default, `gekko shim` generates Gleam `/// @patch(...)` stubs so you get full Gleam LSP support, `gleam check`, and `gekko moonbit bind` without writing raw MoonBit:
 
 ```bash
-gekko shim new simplifile
-# or specify an output directory:
+# In your own app, scaffold stubs for one module or declaration in src/<app>/shims/:
+gekko moonbit bind moonbitlang/x/fs --module ffi/fs
+gekko shim patch --module simplifile
+gekko shim patch filepath:filepath.is_windows
+
+# Or scaffold a standalone companion shim repository:
 gekko shim new simplifile --out ../gekko_simplifile
 ```
 
-This creates a companion package `gekko_simplifile/` with:
+Inside a companion shim repo (which declares `[tools.gekko.shim_for] package = "simplifile"` in `gleam.toml`), `gekko shim init` and `gekko shim patch` write `/// @patch("simplifile.fn")` stubs directly into `src/<shim_name>/`.
 
-```text
-gekko_simplifile/
-├── gleam.toml                 # declares [tools.gekko.shim_for] and [tools.gekko.patches."*"]
-├── src/
-│   └── gekko_simplifile.gleam
-└── patches/
-    └── simplifile/
-        └── simplifile.mbt     # #gekko.patch stubs matching upstream signatures
+*(Pass `--moonbit` to `new`, `init`, or `patch` when you need low-level MoonBit `patches/` files—for example to define zero-variant external types, custom MoonBit traits like `Hash`/`Eq`, or opaque type constructors.)*
+
+### Step 3: Implement `/// @patch(...)` Functions in Gleam
+
+```gleam
+// src/my_app/shims/simplifile.gleam
+import ffi/fs
+import simplifile.{type FileError, Unknown}
+
+/// @patch("simplifile:simplifile.read_bits")
+pub fn read_bits(filepath: String) -> Result(BitArray, FileError) {
+  case fs.read_file_to_bytes(filepath) {
+    Ok(bytes) -> Ok(bytes)
+    Error(err) -> Error(Unknown(fs.io_error_to_string(err)))
+  }
+}
 ```
 
-Inside an existing shim repo, use `gekko shim init`, `gekko shim patch <module>.<decl>`, `gekko shim patch --module <module>`, `gekko shim inspect`, and `gekko shim ack`. Run `gekko check` to materialize `patches/moon.mod`, `patches/gprelude/`, generated `patches/**/moon.pkg`, `patches/**/*.g.mbt`, and `moon.work` for full MoonBit LSP support.
+When transpiling, `gekko` checks that each `/// @patch(...)` signature matches the upstream function and splices the lowered body directly into the upstream module's MoonBit package—avoiding circular package imports while keeping `gleam check` green.
 
-### Step 3: Implement `#gekko.patch` Declarations
+If you need raw MoonBit overrides (`patches/<mod>/<file>.mbt` + `#gekko.patch`), see **[`docs/SHIMS.md`](./SHIMS.md)**.
 
-`gekko.toml` is not needed. In `gleam.toml`, the shim declares which upstream package and SemVer range it targets:
+### Step 3b: Raw MoonBit Escape Hatch (`--moonbit`)
+
+For low-level MoonBit patches, `[tools.gekko.shim_for]` scopes a companion repo in `gleam.toml`:
 
 ```toml
 [tools.gekko.shim_for]

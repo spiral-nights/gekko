@@ -869,9 +869,13 @@ fn validate_dependency_externals(
                   <> int.to_string(line)
                   <> ":"
                   <> int.to_string(col)
-                  <> " (run 'gekko shim new "
+                  <> " (add `/// @patch(\""
+                  <> mod_name
+                  <> "."
+                  <> fn_name
+                  <> "\")` in Gleam, or run `gekko shim new "
                   <> pkg_name
-                  <> "' to scaffold a companion shim, or add #gekko.patch in patches/)"
+                  <> "`)"
                 [msg, ..err_acc]
               }
               False -> err_acc

@@ -3,17 +3,38 @@
 > [!TIP]
 > New to `gekko` or writing your first shim? Start with the step-by-step walkthrough in **[`docs/GUIDE.md`](./GUIDE.md)**. This document is the full companion-shim reference.
 
-`gekko` lets you compile **unmodified upstream Hex packages** to MoonBit and WebAssembly by pairing them with a **companion shim (overlay) package**—without maintaining a source fork or fragile line-based diffs.
+`gekko` lets you compile **unmodified upstream Hex packages** to MoonBit and WebAssembly by writing normal **Gleam shims (`/// @patch(...)`)** (paired with `gekko moonbit bind` when calling MoonBit APIs) or low-level **MoonBit patches (`patches/` + `#gekko.patch`)**—without maintaining a source fork.
 
 ---
 
-## Why Co-Located Module Patches (`patches/` + `#gekko.patch`)?
+## Two Ways to Shim External Code
 
-Most Gleam libraries are 90–99% pure Gleam with a small pocket of `@external(erlang, ...)` / `@external(javascript, ...)` functions and opaque external types.
+### 1. Gleam Shims (`/// @patch(...)`) *(Recommended for most libraries)*
 
-In MoonBit, every directory is a package, and MoonBit forbids circular package imports (`pkg_a` $\leftrightarrow$ `pkg_b`). Because Gleam modules often define error enums (like `DecodeError`) in the *same* module as their `@external` functions, putting FFI in a separate MoonBit package creates circular dependencies.
+Most libraries only need `@external` wrappers (like `simplifile`, `filepath`, env/time/HTTP libs) that can be written directly in Gleam:
 
-**`gekko` solves this by placing each module's MoonBit patch directly inside that module's own transpiled MoonBit package:**
+```gleam
+// src/my_app/shims/simplifile.gleam
+import ffi/fs // generated via: gekko moonbit bind moonbitlang/x/fs
+import simplifile.{type FileError, Unknown}
+
+/// @patch("simplifile:simplifile.read_bits")
+pub fn read_bits(filepath: String) -> Result(BitArray, FileError) {
+  case fs.read_file_to_bytes(filepath) {
+    Ok(bytes) -> Ok(bytes)
+    Error(err) -> Error(Unknown(fs.io_error_to_string(err)))
+  }
+}
+```
+
+- **Full Gleam LSP & `gleam check`:** Autocomplete on `FileError` / `FileInfo` and type checking happen directly in Gleam.
+- **Zero circular imports:** Even though your shim imports `simplifile`, `gekko` splices the lowered body (and any private/module helpers it calls) directly into `simplifile`'s transpiled MoonBit package—so `simplifile` never imports your shim module back.
+- **Private & public targets work:** Both `pub fn` and private upstream `fn` externals (like `filepath:filepath.is_windows`) can be patched as long as their parameter/return types are visible in Gleam.
+- **No unused-code warnings:** Private `/// @patch` functions in shim modules are pruned from their defining module after splicing.
+
+### 2. MoonBit Module Patches (`patches/` + `#gekko.patch`) *(Escape hatch)*
+
+For core ecosystem packages that need raw MoonBit—custom MoonBit trait `impl`s (`Eq`, `Hash`, `Debug`, `GleamInspect` on external types like `Dict`/`Json`), constructing another module's `pub opaque type`, or tight mutable loops—co-located `.mbt` files live inside `patches/<module>/` alongside upstream generated code.
 
 ```text
 gekko_json/                # companion shim package
@@ -26,9 +47,7 @@ gekko_json/                # companion shim package
             └── json.mbt   # #gekko.patch-annotated MoonBit implementations
 ```
 
-Because Gleam already forbids circular imports between `.gleam` modules, co-located module patches keep MoonBit's package graph **100% acyclic**—with zero `__shim_` prefixes, zero extra packages, and direct access to same-module error enums and private helpers.
-
-In your application's `gleam.toml`, depend on **both** the unmodified upstream library and its companion shim, and explicitly enable the shim in `[tools.gekko.use_shims]`:
+In your application's `gleam.toml`, depend on **both** the unmodified upstream library and a companion shim package, and explicitly enable it in `[tools.gekko.use_shims]`:
 
 ```toml
 [dependencies]
@@ -39,7 +58,7 @@ gekko_json = { git = "https://github.com/...", ref = "main" }
 gleam_json = "gekko_json"
 ```
 
-- `gleam check` and `gleam test` (BEAM/JS) ignore `[tools.gekko.*]` and `patches/`, so standard Gleam tooling continues working untouched.
+- `gleam check` and `gleam test` (BEAM/JS) ignore `[tools.gekko.*]`, `/// @patch`, and `patches/`, so standard Gleam tooling continues working untouched.
 - **Root-only authorization:** Dependencies can never silently patch another package. Only shims explicitly listed under `[tools.gekko.use_shims]` in your **root** `gleam.toml` are permitted to apply patches.
 
 ---
@@ -173,13 +192,15 @@ Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[tools
 Use `gekko shim` to create, scaffold, inspect, migrate, and acknowledge companion shims:
 
 ```bash
-# 1. Create a brand-new companion shim repository for a Hex dependency
+# 1. Create a companion shim repository (Gleam /// @patch stubs by default, or --moonbit)
 gekko shim new simplifile --out ../gekko_simplifile
+gekko shim new my_raw_pkg --moonbit
 
-# 2. Inside a shim repository, scaffold all missing externals or one module/decl
+# 2. Scaffold missing externals in a shim repo or in src/<app>/shims/
 gekko shim init
 gekko shim patch --module simplifile
 gekko shim patch simplifile.read_bits
+gekko shim patch simplifile.FileInfo --moonbit
 
 # 3. Inspect patch coverage, unmatched entries, missing externals, and type drift
 gekko shim inspect
@@ -187,11 +208,11 @@ gekko shim inspect
 # 4. Acknowledge reviewed upstream type changes in patches/.gekko_baseline/
 gekko shim ack
 
-# 5. Migrate legacy single-file patches & moon.pkg files into gleam.toml
+# 5. Migrate legacy single-file MoonBit patches & moon.pkg files into gleam.toml
 gekko shim migrate
 ```
 
-`gekko shim patch` is additive and idempotent: it appends `#gekko.patch` stubs matching upstream's exact lowered MoonBit signatures without altering existing declarations.
+`gekko shim patch` is additive and idempotent: by default it generates Gleam `/// @patch(...)` stubs with imports; pass `--moonbit` when you need `#gekko.patch` `.mbt` stubs in `patches/`.
 
 ---
 

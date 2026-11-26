@@ -714,7 +714,7 @@ pub fn lookup_fn_param_labels(
   ctx: EmitCtx,
 ) -> Option(List(Option(String))) {
   let mod_name = option.unwrap(target_module, ctx.current_module)
-  case ctx.table {
+  let from_table = case ctx.table {
     Some(tbl) ->
       case dict.get(tbl.modules, mod_name) {
         Ok(ms) ->
@@ -729,6 +729,10 @@ pub fn lookup_fn_param_labels(
           }
         Error(_) -> None
       }
+    None -> None
+  }
+  case from_table {
+    Some(_) -> from_table
     None ->
       case dict.get(ctx.project_bounds.all_fns, #(mod_name, fn_name)) {
         Ok(f) -> Some(list.map(f.params, fn(p) { p.label }))

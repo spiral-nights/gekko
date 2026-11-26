@@ -757,13 +757,45 @@ pub fn cli_parse_args_help_and_version_test() {
       root: "app",
       package: "simplifile",
       out: Some("out_shim"),
+      moonbit: False,
+    ))
+  assert gekko.parse_args(["shim", "new", "simplifile", "--moonbit"])
+    == Ok(gekko.ShimNewAction(
+      root: ".",
+      package: "simplifile",
+      out: None,
+      moonbit: True,
     ))
   assert gekko.parse_args(["shim", "init", "--root", "shim_repo"])
-    == Ok(gekko.ShimInitAction(root: "shim_repo"))
+    == Ok(gekko.ShimInitAction(root: "shim_repo", moonbit: False))
+  assert gekko.parse_args(["shim", "init", "--moonbit"])
+    == Ok(gekko.ShimInitAction(root: ".", moonbit: True))
   assert gekko.parse_args(["shim", "patch", "gleam/dict.get"])
-    == Ok(gekko.ShimPatchDeclAction(root: ".", target: "gleam/dict.get"))
+    == Ok(gekko.ShimPatchDeclAction(
+      root: ".",
+      target: "gleam/dict.get",
+      moonbit: False,
+    ))
+  assert gekko.parse_args(["shim", "patch", "gleam/dict.get", "--moonbit"])
+    == Ok(gekko.ShimPatchDeclAction(
+      root: ".",
+      target: "gleam/dict.get",
+      moonbit: True,
+    ))
   assert gekko.parse_args(["shim", "patch", "--module", "gleam/dict"])
-    == Ok(gekko.ShimPatchModuleAction(root: ".", module: "gleam/dict"))
+    == Ok(gekko.ShimPatchModuleAction(
+      root: ".",
+      module: "gleam/dict",
+      moonbit: False,
+    ))
+  assert gekko.parse_args([
+      "shim", "patch", "--module", "gleam/dict", "--moonbit",
+    ])
+    == Ok(gekko.ShimPatchModuleAction(
+      root: ".",
+      module: "gleam/dict",
+      moonbit: True,
+    ))
   assert gekko.parse_args(["shim", "migrate"])
     == Ok(gekko.ShimMigrateAction(root: "."))
   assert gekko.parse_args(["shim", "ack"]) == Ok(gekko.ShimAckAction(root: "."))

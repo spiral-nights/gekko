@@ -69,10 +69,11 @@ pub fn desugar_module(
       !symbol_table.is_excluded_for_branch(def.attributes, branch)
     })
   let reachable_fns =
-    symbol_table.reachable_private_functions_for_branch(
+    symbol_table.reachable_private_functions_for_branch_with_roots(
       ast_mod,
       mod_syms.functions,
       branch,
+      mod_syms.gleam_patch_sources,
     )
   let ast_functions =
     ast_mod.functions

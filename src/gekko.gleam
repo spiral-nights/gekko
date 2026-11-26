@@ -79,11 +79,16 @@ pub type CliAction {
     module: Option(String),
     out: Option(String),
   )
-  ShimNewAction(root: String, package: String, out: Option(String))
-  ShimInitAction(root: String)
+  ShimNewAction(
+    root: String,
+    package: String,
+    out: Option(String),
+    moonbit: Bool,
+  )
+  ShimInitAction(root: String, moonbit: Bool)
   ShimInspectAction(root: String, package: Option(String))
-  ShimPatchDeclAction(root: String, target: String)
-  ShimPatchModuleAction(root: String, module: String)
+  ShimPatchDeclAction(root: String, target: String, moonbit: Bool)
+  ShimPatchModuleAction(root: String, module: String, moonbit: Bool)
   ShimMigrateAction(root: String)
   ShimAckAction(root: String)
   HelpAction
@@ -162,25 +167,25 @@ pub fn main() -> Nil {
       require_tools_or_halt(["moon"])
       run_moonbit_bind(root, package, module, out)
     }
-    Ok(ShimNewAction(root:, package:, out:)) -> {
+    Ok(ShimNewAction(root:, package:, out:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
-      run_shim_new(root, package, out)
+      run_shim_new(root, package, out, moonbit)
     }
-    Ok(ShimInitAction(root:)) -> {
+    Ok(ShimInitAction(root:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
-      run_shim_init(root)
+      run_shim_init(root, moonbit)
     }
     Ok(ShimInspectAction(root:, package:)) -> {
       require_tools_or_halt(["gleam"])
       run_shim_inspect(root, package)
     }
-    Ok(ShimPatchDeclAction(root:, target:)) -> {
+    Ok(ShimPatchDeclAction(root:, target:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
-      run_shim_patch_decl(root, target)
+      run_shim_patch_decl(root, target, moonbit)
     }
-    Ok(ShimPatchModuleAction(root:, module:)) -> {
+    Ok(ShimPatchModuleAction(root:, module:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
-      run_shim_patch_module(root, module)
+      run_shim_patch_module(root, module, moonbit)
     }
     Ok(ShimMigrateAction(root:)) -> {
       run_shim_migrate(root)
@@ -1123,8 +1128,27 @@ fn run_moonbit_bind(
   }
 }
 
-fn run_shim_new(root: String, package: String, out: Option(String)) -> Nil {
-  case shim_cli.new_shim(root, package, out) {
+fn shim_style_from_flag(moonbit: Bool) -> shim_cli.ShimStyle {
+  case moonbit {
+    True -> shim_cli.MoonBitShim
+    False -> shim_cli.GleamShim
+  }
+}
+
+fn run_shim_new(
+  root: String,
+  package: String,
+  out: Option(String),
+  moonbit: Bool,
+) -> Nil {
+  case
+    shim_cli.new_shim_with_style(
+      root,
+      package,
+      out,
+      shim_style_from_flag(moonbit),
+    )
+  {
     Error(err) -> {
       io.println_error("gekko shim new error: " <> err)
       halt(1)
@@ -1133,8 +1157,8 @@ fn run_shim_new(root: String, package: String, out: Option(String)) -> Nil {
   }
 }
 
-fn run_shim_init(root: String) -> Nil {
-  case shim_cli.init_in_place(root) {
+fn run_shim_init(root: String, moonbit: Bool) -> Nil {
+  case shim_cli.init_in_place_with_style(root, shim_style_from_flag(moonbit)) {
     Error(err) -> {
       io.println_error("gekko shim init error: " <> err)
       halt(1)
@@ -1153,8 +1177,10 @@ fn run_shim_inspect(root: String, package: Option(String)) -> Nil {
   }
 }
 
-fn run_shim_patch_decl(root: String, target: String) -> Nil {
-  case shim_cli.patch_decl(root, target) {
+fn run_shim_patch_decl(root: String, target: String, moonbit: Bool) -> Nil {
+  case
+    shim_cli.patch_decl_with_style(root, target, shim_style_from_flag(moonbit))
+  {
     Error(err) -> {
       io.println_error("gekko shim patch error: " <> err)
       halt(1)
@@ -1163,8 +1189,14 @@ fn run_shim_patch_decl(root: String, target: String) -> Nil {
   }
 }
 
-fn run_shim_patch_module(root: String, module: String) -> Nil {
-  case shim_cli.patch_module(root, module) {
+fn run_shim_patch_module(root: String, module: String, moonbit: Bool) -> Nil {
+  case
+    shim_cli.patch_module_with_style(
+      root,
+      module,
+      shim_style_from_flag(moonbit),
+    )
+  {
     Error(err) -> {
       io.println_error("gekko shim patch error: " <> err)
       halt(1)
@@ -1303,20 +1335,25 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
         }
         ["moonbit", ..] -> Error("Expected `gekko moonbit bind <pkg> [flags]`")
         ["shim", "new", ..rest] -> {
-          use #(root, pkg_opt, out) <- result.try(parse_shim_new_flags(
+          use #(root, pkg_opt, out, moonbit) <- result.try(parse_shim_new_flags(
             rest,
             ".",
             None,
             None,
+            False,
           ))
           case pkg_opt {
-            Some(pkg) -> Ok(ShimNewAction(root:, package: pkg, out:))
+            Some(pkg) -> Ok(ShimNewAction(root:, package: pkg, out:, moonbit:))
             None -> Error("Expected `<pkg>` after `gekko shim new`")
           }
         }
         ["shim", "init", ..rest] -> {
-          use root <- result.try(parse_shim_root_only_flags(rest, ".", "init"))
-          Ok(ShimInitAction(root:))
+          use #(root, moonbit) <- result.try(parse_shim_init_flags(
+            rest,
+            ".",
+            False,
+          ))
+          Ok(ShimInitAction(root:, moonbit:))
         }
         ["shim", "inspect", ..rest] -> {
           use #(root, pkg_opt) <- result.try(parse_shim_inspect_flags(
@@ -1327,7 +1364,7 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
           Ok(ShimInspectAction(root:, package: pkg_opt))
         }
         ["shim", "patch", ..rest] ->
-          parse_shim_patch_flags(rest, ".", None, None)
+          parse_shim_patch_flags(rest, ".", None, None, False)
         ["shim", "migrate", ..rest] -> {
           use root <- result.try(parse_shim_root_only_flags(
             rest,
@@ -1554,17 +1591,38 @@ fn parse_shim_new_flags(
   root: String,
   pkg: Option(String),
   out: Option(String),
-) -> Result(#(String, Option(String), Option(String)), String) {
+  moonbit: Bool,
+) -> Result(#(String, Option(String), Option(String), Bool), String) {
   case args {
-    [] -> Ok(#(root, pkg, out))
-    ["--root", val, ..rest] -> parse_shim_new_flags(rest, val, pkg, out)
+    [] -> Ok(#(root, pkg, out, moonbit))
+    ["--root", val, ..rest] ->
+      parse_shim_new_flags(rest, val, pkg, out, moonbit)
     ["--out", val, ..rest] | ["--output", val, ..rest] | ["-o", val, ..rest] ->
-      parse_shim_new_flags(rest, root, pkg, Some(val))
+      parse_shim_new_flags(rest, root, pkg, Some(val), moonbit)
+    ["--moonbit", ..rest] -> parse_shim_new_flags(rest, root, pkg, out, True)
     [val, ..rest] ->
       case string.starts_with(val, "-"), pkg {
         True, _ -> Error("Unknown or incomplete flag: " <> val)
-        False, None -> parse_shim_new_flags(rest, root, Some(val), out)
+        False, None -> parse_shim_new_flags(rest, root, Some(val), out, moonbit)
         False, Some(_) -> Error("Unexpected argument: " <> val)
+      }
+  }
+}
+
+fn parse_shim_init_flags(
+  args: List(String),
+  root: String,
+  moonbit: Bool,
+) -> Result(#(String, Bool), String) {
+  case args {
+    [] -> Ok(#(root, moonbit))
+    ["--root", val, ..rest] -> parse_shim_init_flags(rest, val, moonbit)
+    ["--moonbit", ..rest] -> parse_shim_init_flags(rest, root, True)
+    [val, ..] ->
+      case string.starts_with(val, "-") {
+        True -> Error("Unknown or incomplete flag: " <> val)
+        False ->
+          Error("Unexpected argument '" <> val <> "' for `gekko shim init`")
       }
   }
 }
@@ -1597,12 +1655,13 @@ fn parse_shim_patch_flags(
   root: String,
   target: Option(String),
   module: Option(String),
+  moonbit: Bool,
 ) -> Result(CliAction, String) {
   case args {
     [] ->
       case target, module {
-        Some(t), None -> Ok(ShimPatchDeclAction(root:, target: t))
-        None, Some(m) -> Ok(ShimPatchModuleAction(root:, module: m))
+        Some(t), None -> Ok(ShimPatchDeclAction(root:, target: t, moonbit:))
+        None, Some(m) -> Ok(ShimPatchModuleAction(root:, module: m, moonbit:))
         Some(_), Some(_) ->
           Error(
             "Specify either `<module>.<decl>` or `--module <module>`, not both",
@@ -1612,13 +1671,17 @@ fn parse_shim_patch_flags(
             "Expected `<module>.<decl>` or `--module <module>` after `gekko shim patch`",
           )
       }
-    ["--root", val, ..rest] -> parse_shim_patch_flags(rest, val, target, module)
+    ["--root", val, ..rest] ->
+      parse_shim_patch_flags(rest, val, target, module, moonbit)
     ["--module", val, ..rest] ->
-      parse_shim_patch_flags(rest, root, target, Some(val))
+      parse_shim_patch_flags(rest, root, target, Some(val), moonbit)
+    ["--moonbit", ..rest] ->
+      parse_shim_patch_flags(rest, root, target, module, True)
     [val, ..rest] ->
       case string.starts_with(val, "-"), target {
         True, _ -> Error("Unknown or incomplete flag: " <> val)
-        False, None -> parse_shim_patch_flags(rest, root, Some(val), module)
+        False, None ->
+          parse_shim_patch_flags(rest, root, Some(val), module, moonbit)
         False, Some(_) -> Error("Unexpected argument: " <> val)
       }
   }
@@ -1641,11 +1704,11 @@ fn print_usage() -> Nil {
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
     "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",
     "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]",
-    "  gekko shim new     <pkg> [--root <dir>] [--out <dir> | -o <dir>]",
-    "  gekko shim init    [--root <dir>]",
+    "  gekko shim new     <pkg> [--root <dir>] [--out <dir> | -o <dir>] [--moonbit]",
+    "  gekko shim init    [--root <dir>] [--moonbit]",
     "  gekko shim inspect [<pkg>] [--root <dir>]",
-    "  gekko shim patch   <module>.<decl> [--root <dir>]",
-    "  gekko shim patch   --module <module> [--root <dir>]",
+    "  gekko shim patch   <module>.<decl> [--root <dir>] [--moonbit]",
+    "  gekko shim patch   --module <module> [--root <dir>] [--moonbit]",
     "  gekko shim migrate [--root <dir>]",
     "  gekko shim ack     [--root <dir>]",
     "  gekko --version | -V",
@@ -1656,6 +1719,7 @@ fn print_usage() -> Nil {
     "  --out is accepted as a backwards-compatible alias for --work-dir (and -o on build).",
     "  gekko build writes the compiled artifact into the current directory by",
     "  default (or to --output / -o), keeping intermediate files in <root>/build/moonbit.",
+    "  gekko shim generates Gleam /// @patch stubs by default; pass --moonbit for patches/*.mbt.",
   ]
   list.each(lines, io.println)
 }

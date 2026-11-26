@@ -19,6 +19,9 @@ pub type FfiKind {
   WasmImport(wasm_module: String, import_name: String)
   /// Defined directly in a co-located `[patch]` `.mbt` file inside the same MoonBit package.
   Patched
+  /// Implemented by a Gleam function in `source_module` that will be spliced
+  /// into the target module's lowered IR (avoiding circular package imports).
+  GleamPatch(source_module: String, source_function: String)
 }
 
 /// Which `@target(...)` branch to keep when compiling a Gleam module.
@@ -49,6 +52,17 @@ pub type FfiEntry {
   )
 }
 
+/// An extracted `/// @patch("mod.fn")` / `/// @gekko.patch("mod.fn")` mapping
+/// attached to a top-level Gleam function.
+pub type GleamPatchEntry {
+  GleamPatchEntry(
+    source_module: String,
+    source_function: String,
+    target: String,
+    line: Int,
+  )
+}
+
 /// An extracted `@external_type(moonbit, ...)` mapping bound to a custom type.
 pub type ExternalTypeEntry {
   ExternalTypeEntry(
@@ -66,6 +80,7 @@ pub type PrepassResult {
     cleaned_source: String,
     ffi_entries: List(FfiEntry),
     external_types: List(ExternalTypeEntry),
+    gleam_patches: List(GleamPatchEntry),
   )
 }
 
@@ -75,6 +90,23 @@ type PendingFfi {
 
 type PendingExternalType {
   PendingExternalType(target: ExternalType, source: FfiSource, line: Int)
+}
+
+type PendingPatch {
+  PendingPatch(target: String, line: Int)
+}
+
+type ScanState {
+  ScanState(
+    brace_depth: Int,
+    pending_fns: List(PendingFfi),
+    pending_types: List(PendingExternalType),
+    pending_patches: List(PendingPatch),
+    entries: List(FfiEntry),
+    ext_types: List(ExternalTypeEntry),
+    patch_entries: List(GleamPatchEntry),
+    edits: List(TextEdit),
+  )
 }
 
 /// Parse a target string + function name into `PackageCall` or `WasmImport`.
@@ -95,15 +127,26 @@ pub fn preprocess_module(module_name: String, source: String) -> PrepassResult {
     glexer.new(source)
     |> glexer.lex
 
-  let #(entries, ext_types, edits) =
-    scan_tokens(tokens, source, module_name, 0, [], [], [], [], [])
+  let init_state =
+    ScanState(
+      brace_depth: 0,
+      pending_fns: [],
+      pending_types: [],
+      pending_patches: [],
+      entries: [],
+      ext_types: [],
+      patch_entries: [],
+      edits: [],
+    )
+  let final = scan_tokens(tokens, source, module_name, init_state)
 
-  let cleaned_source = apply_edits(source, edits)
+  let cleaned_source = apply_edits(source, final.edits)
 
   PrepassResult(
     cleaned_source:,
-    ffi_entries: list.reverse(entries),
-    external_types: list.reverse(ext_types),
+    ffi_entries: list.reverse(final.entries),
+    external_types: list.reverse(final.ext_types),
+    gleam_patches: list.reverse(final.patch_entries),
   )
 }
 
@@ -117,31 +160,25 @@ pub fn parse_module(
   Ok(#(parsed, result))
 }
 
+fn clear_pending(st: ScanState) -> ScanState {
+  ScanState(..st, pending_fns: [], pending_types: [], pending_patches: [])
+}
+
 fn scan_tokens(
   tokens: List(#(Token, glexer.Position)),
   source: String,
   module_name: String,
-  brace_depth: Int,
-  pending_fns: List(PendingFfi),
-  pending_types: List(PendingExternalType),
-  entries: List(FfiEntry),
-  ext_types: List(ExternalTypeEntry),
-  edits: List(TextEdit),
-) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
+  st: ScanState,
+) -> ScanState {
   case tokens {
-    [] -> #(entries, ext_types, edits)
+    [] -> st
 
     [#(token.LeftBrace, _), ..rest] ->
       scan_tokens(
         rest,
         source,
         module_name,
-        brace_depth + 1,
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
+        clear_pending(ScanState(..st, brace_depth: st.brace_depth + 1)),
       )
 
     [#(token.RightBrace, _), ..rest] ->
@@ -149,62 +186,51 @@ fn scan_tokens(
         rest,
         source,
         module_name,
-        int.max(0, brace_depth - 1),
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
+        clear_pending(
+          ScanState(..st, brace_depth: int.max(0, st.brace_depth - 1)),
+        ),
       )
 
     // Skip whitespace & regular/module comments without dropping pending pragmas.
     [#(token.Space(_), _), ..rest]
     | [#(token.CommentNormal(_), _), ..rest]
     | [#(token.CommentModule(_), _), ..rest] ->
-      scan_tokens(
-        rest,
-        source,
-        module_name,
-        brace_depth,
-        pending_fns,
-        pending_types,
-        entries,
-        ext_types,
-        edits,
-      )
+      scan_tokens(rest, source, module_name, st)
 
-    // Doc comment at top level: check for `/// @external(...)` or `/// @external_type(...)`
-    [#(token.CommentDoc(doc_text), pos), ..rest] if brace_depth == 0 -> {
+    // Doc comment at top level: check for `/// @external(...)`, `/// @external_type(...)`,
+    // and `/// @patch(...)` / `/// @gekko.patch(...)`.
+    [#(token.CommentDoc(doc_text), pos), ..rest] if st.brace_depth == 0 -> {
       let line = byte_offset_to_line(source, pos.byte_offset)
       let pending_fns = case parse_doc_pragma(doc_text) {
         Some(kind) -> [
           PendingFfi(kind:, source: DocPragma, line:),
-          ..pending_fns
+          ..st.pending_fns
         ]
-        None -> pending_fns
+        None -> st.pending_fns
       }
       let pending_types = case parse_doc_external_type_pragma(doc_text) {
         Some(target) -> [
           PendingExternalType(target:, source: DocPragma, line:),
-          ..pending_types
+          ..st.pending_types
         ]
-        None -> pending_types
+        None -> st.pending_types
       }
+      let pending_patches =
+        list.fold(
+          parse_doc_patch_pragmas(doc_text),
+          st.pending_patches,
+          fn(acc, target) { [PendingPatch(target:, line:), ..acc] },
+        )
       scan_tokens(
         rest,
         source,
         module_name,
-        brace_depth,
-        pending_fns,
-        pending_types,
-        entries,
-        ext_types,
-        edits,
+        ScanState(..st, pending_fns:, pending_types:, pending_patches:),
       )
     }
 
     // Raw attribute at top level: `@external(moonbit, ...)` or `@external_type(moonbit, ...)`
-    [#(token.At, pos), ..after_at] if brace_depth == 0 -> {
+    [#(token.At, pos), ..after_at] if st.brace_depth == 0 -> {
       case match_raw_external_moonbit(after_at) {
         Some(#(kind, end_offset, remaining)) -> {
           let start_offset = pos.byte_offset
@@ -220,18 +246,13 @@ fn scan_tokens(
             TextEdit(start: start_offset, end: end_offset, replacement:)
           let pending_fns = [
             PendingFfi(kind:, source: RawAttribute, line:),
-            ..pending_fns
+            ..st.pending_fns
           ]
           scan_tokens(
             remaining,
             source,
             module_name,
-            brace_depth,
-            pending_fns,
-            pending_types,
-            entries,
-            ext_types,
-            [edit, ..edits],
+            ScanState(..st, pending_fns:, edits: [edit, ..st.edits]),
           )
         }
         None ->
@@ -250,189 +271,60 @@ fn scan_tokens(
                 TextEdit(start: start_offset, end: end_offset, replacement:)
               let pending_types = [
                 PendingExternalType(target:, source: RawAttribute, line:),
-                ..pending_types
+                ..st.pending_types
               ]
               scan_tokens(
                 remaining,
                 source,
                 module_name,
-                brace_depth,
-                pending_fns,
-                pending_types,
-                entries,
-                ext_types,
-                [edit, ..edits],
+                ScanState(..st, pending_types:, edits: [edit, ..st.edits]),
               )
             }
-            None ->
-              scan_tokens(
-                after_at,
-                source,
-                module_name,
-                brace_depth,
-                pending_fns,
-                pending_types,
-                entries,
-                ext_types,
-                edits,
-              )
+            None -> scan_tokens(after_at, source, module_name, st)
           }
       }
     }
 
     // Top-level `pub ...`
-    [#(token.Pub, _), ..after_pub] if brace_depth == 0 -> {
+    [#(token.Pub, _), ..after_pub] if st.brace_depth == 0 -> {
       let after_ws = skip_trivia(after_pub)
       case after_ws {
         [#(token.Fn, _), ..after_fn] ->
-          handle_top_fn(
-            after_fn,
-            source,
-            module_name,
-            pending_fns,
-            entries,
-            ext_types,
-            edits,
-          )
+          handle_top_fn(after_fn, source, module_name, st)
         [#(token.Opaque, _), ..after_opaque] ->
           case skip_trivia(after_opaque) {
             [#(token.Type, _), ..after_type] ->
-              handle_top_type(
-                after_type,
-                source,
-                module_name,
-                pending_types,
-                entries,
-                ext_types,
-                edits,
-              )
-            other ->
-              scan_tokens(
-                other,
-                source,
-                module_name,
-                brace_depth,
-                [],
-                [],
-                entries,
-                ext_types,
-                edits,
-              )
+              handle_top_type(after_type, source, module_name, st)
+            other -> scan_tokens(other, source, module_name, clear_pending(st))
           }
         [#(token.Type, _), ..after_type] ->
-          handle_top_type(
-            after_type,
-            source,
-            module_name,
-            pending_types,
-            entries,
-            ext_types,
-            edits,
-          )
+          handle_top_type(after_type, source, module_name, st)
         [#(token.Const, _), ..rest] ->
-          scan_tokens(
-            rest,
-            source,
-            module_name,
-            brace_depth,
-            [],
-            [],
-            entries,
-            ext_types,
-            edits,
-          )
-        _ ->
-          scan_tokens(
-            after_ws,
-            source,
-            module_name,
-            brace_depth,
-            [],
-            [],
-            entries,
-            ext_types,
-            edits,
-          )
+          scan_tokens(rest, source, module_name, clear_pending(st))
+        _ -> scan_tokens(after_ws, source, module_name, clear_pending(st))
       }
     }
 
-    [#(token.Fn, _), ..after_fn] if brace_depth == 0 ->
-      handle_top_fn(
-        after_fn,
-        source,
-        module_name,
-        pending_fns,
-        entries,
-        ext_types,
-        edits,
-      )
+    [#(token.Fn, _), ..after_fn] if st.brace_depth == 0 ->
+      handle_top_fn(after_fn, source, module_name, st)
 
-    [#(token.Opaque, _), ..after_opaque] if brace_depth == 0 ->
+    [#(token.Opaque, _), ..after_opaque] if st.brace_depth == 0 ->
       case skip_trivia(after_opaque) {
         [#(token.Type, _), ..after_type] ->
-          handle_top_type(
-            after_type,
-            source,
-            module_name,
-            pending_types,
-            entries,
-            ext_types,
-            edits,
-          )
-        other ->
-          scan_tokens(
-            other,
-            source,
-            module_name,
-            brace_depth,
-            [],
-            [],
-            entries,
-            ext_types,
-            edits,
-          )
+          handle_top_type(after_type, source, module_name, st)
+        other -> scan_tokens(other, source, module_name, clear_pending(st))
       }
 
-    [#(token.Type, _), ..after_type] if brace_depth == 0 ->
-      handle_top_type(
-        after_type,
-        source,
-        module_name,
-        pending_types,
-        entries,
-        ext_types,
-        edits,
-      )
+    [#(token.Type, _), ..after_type] if st.brace_depth == 0 ->
+      handle_top_type(after_type, source, module_name, st)
 
     // Non-matching top-level declaration clears stray pending pragmas
     [#(token.Const, _), ..rest]
       | [#(token.Import, _), ..rest]
-      if brace_depth == 0
-    ->
-      scan_tokens(
-        rest,
-        source,
-        module_name,
-        brace_depth,
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
-      )
+      if st.brace_depth == 0
+    -> scan_tokens(rest, source, module_name, clear_pending(st))
 
-    [_, ..rest] ->
-      scan_tokens(
-        rest,
-        source,
-        module_name,
-        brace_depth,
-        pending_fns,
-        pending_types,
-        entries,
-        ext_types,
-        edits,
-      )
+    [_, ..rest] -> scan_tokens(rest, source, module_name, st)
   }
 }
 
@@ -440,15 +332,12 @@ fn handle_top_type(
   after_type: List(#(Token, glexer.Position)),
   source: String,
   module_name: String,
-  pending_types: List(PendingExternalType),
-  entries: List(FfiEntry),
-  ext_types: List(ExternalTypeEntry),
-  edits: List(TextEdit),
-) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
+  st: ScanState,
+) -> ScanState {
   case skip_trivia(after_type) {
     [#(token.UpperName(type_name), _), ..rest] -> {
       let new_ext_types =
-        pending_types
+        st.pending_types
         |> list.reverse
         |> list.map(fn(p) {
           ExternalTypeEntry(
@@ -460,17 +349,12 @@ fn handle_top_type(
           )
         })
       let ext_types =
-        list.fold(new_ext_types, ext_types, fn(acc, e) { [e, ..acc] })
+        list.fold(new_ext_types, st.ext_types, fn(acc, e) { [e, ..acc] })
       scan_tokens(
         rest,
         source,
         module_name,
-        0,
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
+        clear_pending(ScanState(..st, brace_depth: 0, ext_types:)),
       )
     }
     other ->
@@ -478,12 +362,7 @@ fn handle_top_type(
         other,
         source,
         module_name,
-        0,
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
+        clear_pending(ScanState(..st, brace_depth: 0)),
       )
   }
 }
@@ -492,17 +371,14 @@ fn handle_top_fn(
   after_fn: List(#(Token, glexer.Position)),
   source: String,
   module_name: String,
-  pending: List(PendingFfi),
-  entries: List(FfiEntry),
-  ext_types: List(ExternalTypeEntry),
-  edits: List(TextEdit),
-) -> #(List(FfiEntry), List(ExternalTypeEntry), List(TextEdit)) {
+  st: ScanState,
+) -> ScanState {
   case skip_trivia(after_fn) {
     [#(token.Name(fn_name), _), ..after_name] -> {
       case skip_trivia(after_name) {
         [#(token.LeftParen, _), ..] as params_tokens -> {
           let new_entries =
-            pending
+            st.pending_fns
             |> list.reverse
             |> list.map(fn(p) {
               FfiEntry(
@@ -514,15 +390,29 @@ fn handle_top_fn(
               )
             })
           let entries =
-            list.fold(new_entries, entries, fn(acc, e) { [e, ..acc] })
+            list.fold(new_entries, st.entries, fn(acc, e) { [e, ..acc] })
 
-          let #(edits, remaining) = case pending {
-            [] -> #(edits, params_tokens)
+          let new_patches =
+            st.pending_patches
+            |> list.reverse
+            |> list.map(fn(p) {
+              GleamPatchEntry(
+                source_module: module_name,
+                source_function: fn_name,
+                target: p.target,
+                line: p.line,
+              )
+            })
+          let patch_entries =
+            list.fold(new_patches, st.patch_entries, fn(acc, e) { [e, ..acc] })
+
+          let #(edits, remaining) = case st.pending_fns {
+            [] -> #(st.edits, params_tokens)
             [_, ..] ->
               case find_fn_signature_end(params_tokens) {
                 Some(#(sig_end, has_body, rest_tokens)) ->
                   case has_body {
-                    True -> #(edits, rest_tokens)
+                    True -> #(st.edits, rest_tokens)
                     False -> {
                       let edit =
                         TextEdit(
@@ -530,22 +420,19 @@ fn handle_top_fn(
                           end: sig_end,
                           replacement: " { panic as \"external\" }",
                         )
-                      #([edit, ..edits], rest_tokens)
+                      #([edit, ..st.edits], rest_tokens)
                     }
                   }
-                None -> #(edits, params_tokens)
+                None -> #(st.edits, params_tokens)
               }
           }
           scan_tokens(
             remaining,
             source,
             module_name,
-            0,
-            [],
-            [],
-            entries,
-            ext_types,
-            edits,
+            clear_pending(
+              ScanState(..st, brace_depth: 0, entries:, patch_entries:, edits:),
+            ),
           )
         }
         other ->
@@ -553,12 +440,7 @@ fn handle_top_fn(
             other,
             source,
             module_name,
-            0,
-            [],
-            [],
-            entries,
-            ext_types,
-            edits,
+            clear_pending(ScanState(..st, brace_depth: 0)),
           )
       }
     }
@@ -567,12 +449,7 @@ fn handle_top_fn(
         other,
         source,
         module_name,
-        0,
-        [],
-        [],
-        entries,
-        ext_types,
-        edits,
+        clear_pending(ScanState(..st, brace_depth: 0)),
       )
   }
 }
@@ -588,6 +465,89 @@ fn parse_doc_external_type_pragma(doc_text: String) -> Option(ExternalType) {
     "external_type",
   ))
   Some(ExternalType(package: pkg, type_name:))
+}
+
+fn parse_doc_patch_pragmas(doc_text: String) -> List(String) {
+  string.split(doc_text, "\n")
+  |> scan_doc_patch_lines(False, [])
+  |> list.reverse
+}
+
+fn scan_doc_patch_lines(
+  lines: List(String),
+  in_fence: Bool,
+  rev_acc: List(String),
+) -> List(String) {
+  case lines {
+    [] -> rev_acc
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case string.starts_with(trimmed, "```") {
+        True -> scan_doc_patch_lines(rest, !in_fence, rev_acc)
+        False -> {
+          let next_acc = case
+            !in_fence
+            && {
+              string.starts_with(trimmed, "@patch")
+              || string.starts_with(trimmed, "@gekko.patch")
+            }
+          {
+            True ->
+              case parse_single_doc_patch(trimmed) {
+                Some(target) if target != "" -> [target, ..rev_acc]
+                _ -> rev_acc
+              }
+            False -> rev_acc
+          }
+          scan_doc_patch_lines(rest, in_fence, next_acc)
+        }
+      }
+    }
+  }
+}
+
+fn parse_single_doc_patch(trimmed: String) -> Option(String) {
+  let tokens =
+    glexer.new(trimmed)
+    |> glexer.lex
+  case tokens {
+    [#(token.At, _), ..after_at] -> {
+      let after_name = case skip_trivia(after_at) {
+        [#(token.Name("patch"), _), ..rest] -> Some(rest)
+        [#(token.Name("gekko"), _), ..after_gekko] ->
+          case skip_trivia(after_gekko) {
+            [#(token.Dot, _), ..after_dot] ->
+              case skip_trivia(after_dot) {
+                [#(token.Name("patch"), _), ..rest] -> Some(rest)
+                _ -> None
+              }
+            _ -> None
+          }
+        _ -> None
+      }
+      case after_name {
+        None -> None
+        Some(rest) ->
+          case skip_trivia(rest) {
+            [#(token.LeftParen, _), ..after_lp] ->
+              case skip_trivia(after_lp) {
+                [#(token.String(target), _), ..after_str] ->
+                  case match_trailing_close_paren(after_str, target, "") {
+                    Some(#(t, _, _, remaining)) ->
+                      case skip_trivia(remaining) {
+                        [] -> Some(t)
+                        _ -> None
+                      }
+                    None -> None
+                  }
+                _ -> None
+              }
+            _ -> None
+          }
+      }
+    }
+    _ -> None
+  }
 }
 
 fn parse_doc_directive(

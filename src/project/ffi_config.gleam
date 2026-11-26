@@ -7,12 +7,13 @@ import gleam/order
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
+import project/fs
 import project/moonbit_lex
 import project/patch_discovery
 import project/paths
 import project/prepass.{
-  type ExternalType, type FfiKind, type TargetBranch, ExternalType, PackageCall,
-  Patched, PreferErlang, PreferJavascript, WasmImport,
+  type ExternalType, type FfiKind, type TargetBranch, ExternalType, GleamPatch,
+  PackageCall, Patched, PreferErlang, PreferJavascript, WasmImport,
 }
 import simplifile
 import tom.{type Toml}
@@ -1083,7 +1084,29 @@ pub fn load_package_overlay(
 
   let #(patch_fn_overrides, patch_type_overrides) =
     expand_patch_entries(resolved_patches)
-  let overrides = dict.merge(patch_fn_overrides, explicit_overrides)
+  use gleam_patch_overrides <- result.try(discover_gleam_patches(
+    pkg_root,
+    target_pkg,
+  ))
+  use _ <- result.try(
+    dict.keys(gleam_patch_overrides)
+    |> list.try_each(fn(k) {
+      case dict.has_key(patch_fn_overrides, k) {
+        True ->
+          Error(
+            "Conflicting MoonBit #gekko.patch and Gleam @patch for '"
+            <> k
+            <> "' in package '"
+            <> pkg_name
+            <> "'",
+          )
+        False -> Ok(Nil)
+      }
+    }),
+  )
+  let overrides =
+    dict.merge(patch_fn_overrides, gleam_patch_overrides)
+    |> dict.merge(explicit_overrides)
   let type_overrides = dict.merge(patch_type_overrides, explicit_type_overrides)
 
   Ok(PackageOverlay(
@@ -1095,6 +1118,155 @@ pub fn load_package_overlay(
     module_patches: resolved_patches,
     target_branches:,
   ))
+}
+
+/// Discover `/// @patch("mod.fn")` / `/// @gekko.patch("mod.fn")` annotations
+/// across Gleam modules under `<pkg_root>/src/`.
+pub fn discover_gleam_patches(
+  pkg_root: String,
+  target_pkg: Option(String),
+) -> Result(Dict(String, FfiKind), String) {
+  let src_dir = filepath.join(pkg_root, "src")
+  case simplifile.is_directory(src_dir) {
+    Ok(True) -> {
+      use rel_paths <- result.try(collect_gleam_src_files(src_dir, ""))
+      list.sort(rel_paths, string.compare)
+      |> list.try_fold(dict.new(), fn(acc, rel) {
+        let mod_name = filepath.strip_extension(rel)
+        let full_path = filepath.join(src_dir, rel)
+        use src <- result.try(fs.read_text(full_path))
+        case
+          string.contains(src, "@patch") || string.contains(src, "@gekko.patch")
+        {
+          False -> Ok(acc)
+          True -> {
+            let res = prepass.preprocess_module(mod_name, src)
+            list.try_fold(res.gleam_patches, acc, fn(inner_acc, entry) {
+              use key <- result.try(qualify_gleam_patch_target(
+                entry.target,
+                target_pkg,
+                full_path,
+                entry.line,
+              ))
+              case dict.has_key(inner_acc, key) {
+                True ->
+                  Error(
+                    "Duplicate @patch target '"
+                    <> key
+                    <> "' at "
+                    <> full_path
+                    <> ":"
+                    <> int.to_string(entry.line),
+                  )
+                False ->
+                  Ok(dict.insert(
+                    inner_acc,
+                    key,
+                    GleamPatch(
+                      source_module: entry.source_module,
+                      source_function: entry.source_function,
+                    ),
+                  ))
+              }
+            })
+          }
+        }
+      })
+    }
+    _ -> Ok(dict.new())
+  }
+}
+
+fn collect_gleam_src_files(
+  base_dir: String,
+  rel_prefix: String,
+) -> Result(List(String), String) {
+  let current = case rel_prefix {
+    "" -> base_dir
+    _ -> filepath.join(base_dir, rel_prefix)
+  }
+  use entries <- result.try(
+    simplifile.read_directory(at: current)
+    |> result.map_error(fn(err) {
+      "Failed to read directory '"
+      <> current
+      <> "': "
+      <> simplifile.describe_error(err)
+    }),
+  )
+  list.try_fold(entries, [], fn(acc, entry) {
+    case fs.is_ignored_entry(entry) {
+      True -> Ok(acc)
+      False -> {
+        let rel = case rel_prefix {
+          "" -> entry
+          _ -> filepath.join(rel_prefix, entry)
+        }
+        let full = filepath.join(base_dir, rel)
+        case simplifile.is_directory(full) {
+          Ok(True) -> {
+            use nested <- result.try(collect_gleam_src_files(base_dir, rel))
+            Ok(list.append(acc, nested))
+          }
+          Ok(False) ->
+            case string.ends_with(entry, ".gleam") {
+              True -> Ok([rel, ..acc])
+              False -> Ok(acc)
+            }
+          Error(err) ->
+            Error(
+              "Failed to stat '"
+              <> full
+              <> "': "
+              <> simplifile.describe_error(err),
+            )
+        }
+      }
+    }
+  })
+}
+
+fn qualify_gleam_patch_target(
+  target: String,
+  target_pkg: Option(String),
+  file_path: String,
+  line: Int,
+) -> Result(String, String) {
+  let loc = file_path <> ":" <> int.to_string(line)
+  let invalid = fn() {
+    Error(
+      "Invalid @patch target '"
+      <> target
+      <> "' at "
+      <> loc
+      <> " (expected \"module.fn\" or \"pkg:module.fn\")",
+    )
+  }
+  let valid_mod_fn = fn(s: String) -> Bool {
+    case string.split(s, ".") |> list.reverse {
+      [fn_part, ..rev_rest] if rev_rest != [] && fn_part != "" -> {
+        let mod_part = rev_rest |> list.reverse |> string.join(".")
+        mod_part != ""
+      }
+      _ -> False
+    }
+  }
+  case string.split_once(target, ":") {
+    Ok(#(pkg, rest)) ->
+      case pkg != "" && valid_mod_fn(rest) {
+        True -> Ok(target)
+        False -> invalid()
+      }
+    Error(_) ->
+      case valid_mod_fn(target) {
+        True ->
+          case target_pkg {
+            Some(tp) -> Ok(tp <> ":" <> target)
+            None -> Ok(target)
+          }
+        False -> invalid()
+      }
+  }
 }
 
 fn convert_discovered_patches(

@@ -37,6 +37,7 @@ pub type ModuleSymbols {
     functions: Dict(String, FunctionInfo),
     mangled_functions: Dict(String, FunctionInfo),
     constants: Dict(String, ConstantInfo),
+    gleam_patch_sources: Set(String),
   )
 }
 
@@ -56,6 +57,7 @@ pub fn empty_module_symbols(name: String) -> ModuleSymbols {
     functions: dict.new(),
     mangled_functions: dict.new(),
     constants: dict.new(),
+    gleam_patch_sources: set.new(),
   )
 }
 
@@ -517,6 +519,11 @@ fn index_module(
       mod_to_pkg,
     )
 
+  let gleam_patch_sources =
+    prepass_res.gleam_patches
+    |> list.map(fn(entry) { entry.source_function })
+    |> set.from_list
+
   ModuleSymbols(
     name: mod_name,
     source: prepass_res.cleaned_source,
@@ -531,6 +538,7 @@ fn index_module(
     functions:,
     mangled_functions:,
     constants:,
+    gleam_patch_sources:,
   )
 }
 
@@ -1297,6 +1305,22 @@ pub fn reachable_private_functions_for_branch(
   functions: Dict(String, FunctionInfo),
   branch: TargetBranch,
 ) -> Set(String) {
+  reachable_private_functions_for_branch_with_roots(
+    ast_mod,
+    functions,
+    branch,
+    set.new(),
+  )
+}
+
+/// Like `reachable_private_functions_for_branch`, additionally keeping private
+/// functions in `extra_roots` (such as `/// @patch(...)` source implementations).
+pub fn reachable_private_functions_for_branch_with_roots(
+  ast_mod: glance.Module,
+  functions: Dict(String, FunctionInfo),
+  branch: TargetBranch,
+  extra_roots: Set(String),
+) -> Set(String) {
   let active_fns =
     ast_mod.functions
     |> list.filter(fn(def) { !is_excluded_for_branch(def.attributes, branch) })
@@ -1321,6 +1345,7 @@ pub fn reachable_private_functions_for_branch(
         f.publicity == glance.Public
         || f.name == "main"
         || string.ends_with(f.name, "_test")
+        || set.contains(extra_roots, f.name)
       case is_root {
         True -> Ok(f.name)
         False -> Error(Nil)

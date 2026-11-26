@@ -10,7 +10,8 @@ import project/ffi_config
 import project/loader
 import project/patch_discovery
 import project/prepass.{
-  ExternalType, PackageCall, PreferErlang, PreferJavascript, WasmImport,
+  ExternalType, GleamPatch, GleamPatchEntry, PackageCall, PreferErlang,
+  PreferJavascript, WasmImport,
 }
 import project/shim_cli
 import project/workspace
@@ -977,4 +978,503 @@ pub fn shim_migrate_single_file_and_moon_pkg_test() {
 
   let _ = simplifile.delete(file_or_dir_at: root)
   Nil
+}
+
+pub fn prepass_gleam_patch_pragmas_test() {
+  let src =
+    "/// @patch(\"mod/alpha.fn_a\")
+/// @gekko.patch(\"pkg:mod/alpha.fn_b\")
+pub fn impl_ab(x: Int) -> Int {
+  x + 1
+}
+
+/// @patch(\"mod/alpha.priv_fn\")
+fn impl_priv() -> Bool {
+  False
+}
+"
+  let res = prepass.preprocess_module("my/shim", src)
+  assert res.cleaned_source == src
+  assert res.ffi_entries == []
+  assert res.gleam_patches
+    == [
+      GleamPatchEntry(
+        source_module: "my/shim",
+        source_function: "impl_ab",
+        target: "mod/alpha.fn_a",
+        line: 1,
+      ),
+      GleamPatchEntry(
+        source_module: "my/shim",
+        source_function: "impl_ab",
+        target: "pkg:mod/alpha.fn_b",
+        line: 2,
+      ),
+      GleamPatchEntry(
+        source_module: "my/shim",
+        source_function: "impl_priv",
+        target: "mod/alpha.priv_fn",
+        line: 7,
+      ),
+    ]
+}
+
+pub fn ffi_config_gleam_patch_discovery_and_scope_test() {
+  let root = "build/test_fixtures/gleam_patch_discovery"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(root, "src/shims"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gekko_up\"\nversion = \"0.1.0\"\n[tools.gekko.shim_for]\npackage = \"upstream\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/shims/up.gleam"),
+      contents: "/// @patch(\"up.foo\")\npub fn foo_impl() -> Int { 1 }\n\n/// @gekko.patch(\"upstream:up.bar\")\nfn bar_impl() -> Bool { True }\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(ov) = ffi_config.load_package_overlay(root, "gekko_up")
+  assert dict.get(ov.overrides, "upstream:up.foo")
+    == Ok(GleamPatch(source_module: "shims/up", source_function: "foo_impl"))
+  assert dict.get(ov.overrides, "upstream:up.bar")
+    == Ok(GleamPatch(source_module: "shims/up", source_function: "bar_impl"))
+
+  // Duplicate target in same shim package errors
+  assert simplifile.write(
+      to: filepath.join(root, "src/shims/dup.gleam"),
+      contents: "/// @patch(\"up.foo\")\npub fn dup_foo() -> Int { 2 }\n",
+    )
+    == Ok(Nil)
+  assert ffi_config.load_package_overlay(root, "gekko_up") |> is_error
+
+  // Conflict between MoonBit #gekko.patch and Gleam @patch errors
+  let _ =
+    simplifile.delete(file_or_dir_at: filepath.join(root, "src/shims/dup.gleam"))
+  assert simplifile.create_directory_all(filepath.join(root, "patches/up"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "patches/up/up.mbt"),
+      contents: "///|\n#gekko.patch\npub fn foo() -> Int64 { 3L }\n",
+    )
+    == Ok(Nil)
+  let assert Error(conflict_err) =
+    ffi_config.load_package_overlay(root, "gekko_up")
+  assert string.contains(conflict_err, "Conflicting")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn gleam_patch_end_to_end_splicing_test() {
+  let base = "build/test_fixtures/gleam_patch_e2e"
+  let up_dir = filepath.join(base, "upstream")
+  let shim_dir = filepath.join(base, "gekko_upstream")
+  let app_dir = filepath.join(base, "consumer_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(shim_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "test"))
+    == Ok(Nil)
+
+  // Upstream package with public & private @external(erlang, ...) + generic eq fn + custom type
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/fs.gleam"),
+      contents: "pub type FileErr {
+  NotFound
+  BadPath(reason: String)
+}
+
+pub fn helper_tag() -> String {
+  \"UP\"
+}
+
+@external(erlang, \"up_ffi\", \"read_data\")
+pub fn read_data(path: String) -> Result(String, FileErr)
+
+@external(erlang, \"up_ffi\", \"is_win\")
+fn is_win() -> Bool
+
+@external(erlang, \"up_ffi\", \"same_val\")
+pub fn same_val(a: x, b: x) -> Bool
+
+pub fn check_path(p: String) -> String {
+  case is_win() {
+    True -> \"win:\" <> p
+    False -> \"posix:\" <> p
+  }
+}
+",
+    )
+    == Ok(Nil)
+
+  // Companion shim package written purely in Gleam importing up/fs!
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream\"
+version = \"0.1.0\"
+
+[dependencies]
+upstream = { path = \"../upstream\" }
+
+[tools.gekko.shim_for]
+package = \"upstream\"
+version = \">= 1.0.0 and < 2.0.0\"
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "src/gekko_upstream.gleam"),
+      contents: "import up/fs.{type FileErr, BadPath, NotFound}
+
+const sep = \":\"
+
+fn format_rec(prefix tag: String, name val: String, count n: Int) -> String {
+  case n <= 0 {
+    True -> tag <> sep <> val
+    False -> format_rec(name: val, prefix: tag, count: n - 1)
+  }
+}
+
+/// @patch(\"up/fs.read_data\")
+pub fn read_data(path: String) -> Result(String, FileErr) {
+  case path {
+    \"\" -> Error(NotFound)
+    \"bad\" -> Error(BadPath(reason: format_rec(prefix: fs.helper_tag(), name: path, count: 1)))
+    _ -> {
+      let sep = \"=\"
+      Ok(fs.helper_tag() <> sep <> path)
+    }
+  }
+}
+
+/// @patch(\"up/fs.is_win\")
+fn is_win_impl() -> Bool {
+  False
+}
+
+/// @patch(\"up/fs.same_val\")
+pub fn same_val_impl(first: t, second: t) -> Bool {
+  first == second
+}
+",
+    )
+    == Ok(Nil)
+
+  // Downstream consumer app enabling the Gleam companion shim
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"consumer_app\"
+version = \"0.1.0\"
+
+[dependencies]
+upstream = { path = \"../upstream\" }
+gekko_upstream = { path = \"../gekko_upstream\" }
+
+[tools.gekko.use_shims]
+upstream = \"gekko_upstream\"
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/consumer_app.gleam"),
+      contents: "import up/fs.{BadPath, NotFound}
+
+pub fn run_all() -> #(Result(String, fs.FileErr), Result(String, fs.FileErr), Result(String, fs.FileErr), String, Bool) {
+  #(
+    fs.read_data(\"\"),
+    fs.read_data(\"bad\"),
+    fs.read_data(\"ok.txt\"),
+    fs.check_path(\"/tmp\"),
+    fs.same_val(42, 42) && !fs.same_val(1, 2),
+  )
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "test/consumer_app_test.gleam"),
+      contents: "import consumer_app
+import up/fs.{BadPath, NotFound}
+
+pub fn patch_behavior_test() {
+  assert consumer_app.run_all()
+    == #(
+      Error(NotFound),
+      Error(BadPath(reason: \"UP:bad\")),
+      Ok(\"UP=ok.txt\"),
+      \"posix:/tmp\",
+      True,
+    )
+}
+",
+    )
+    == Ok(Nil)
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Ok(summary) = workspace.transpile_project(app_dir, out_dir)
+  assert summary.missing_externals == []
+
+  // Verify private is_win_impl was pruned from gekko_upstream.mbt (zero unused warnings)
+  let assert Ok(shim_mbt) =
+    simplifile.read(filepath.join(out_dir, "gekko_upstream/gekko_upstream.mbt"))
+  assert !string.contains(shim_mbt, "is_win_impl")
+
+  let chk =
+    cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
+  assert chk.exit_code == 0
+
+  let tst = cmd.run("moon", ["test", "--target", "wasm"], out_dir)
+  assert tst.exit_code == 0
+
+  // Also test signature mismatch rejection
+  let mismatch_src =
+    "import up/fs.{type FileErr}
+/// @patch(\"up/fs.read_data\")
+pub fn read_data(path: Int) -> Result(String, FileErr) {
+  let _ = path
+  todo
+}
+
+/// @patch(\"up/fs.is_win\")
+fn is_win_impl() -> Bool {
+  False
+}
+
+/// @patch(\"up/fs.same_val\")
+pub fn same_val_impl(first: t, second: t) -> Bool {
+  first == second
+}
+"
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "src/gekko_upstream.gleam"),
+      contents: mismatch_src,
+    )
+    == Ok(Nil)
+  let assert Error(sig_err) = workspace.transpile_project(app_dir, out_dir)
+  assert string.contains(sig_err, "mismatch")
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+pub fn shim_cli_gleam_scaffolding_test() {
+  let base = "build/test_fixtures/shim_cli_gleam"
+  let up_dir = filepath.join(base, "raw_pkg")
+  let app_dir = filepath.join(base, "my_app")
+  let shim_dir = filepath.join(base, "gekko_raw_pkg")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/raw"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"raw_pkg\"\nversion = \"1.2.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/raw/io.gleam"),
+      contents: "pub type IoErr { Failed }
+@external(erlang, \"e\", \"read\")
+pub fn read_txt(path: String) -> Result(String, IoErr)
+
+@external(erlang, \"e\", \"ok_check\")
+fn ok_check(flag: Bool) -> Bool
+
+pub fn use_ok(flag: Bool) -> Bool {
+  ok_check(flag)
+}
+",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"my_app\"\nversion = \"0.1.0\"\n[dependencies]\nraw_pkg = { path = \"../raw_pkg\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/my_app.gleam"),
+      contents: "pub fn main() -> Int { 0 }\n",
+    )
+    == Ok(Nil)
+
+  // 1. new_shim_with_style GleamShim scaffolds src/<shim>/<mod>.gleam
+  let assert Ok(new_msg) =
+    shim_cli.new_shim_with_style(
+      app_dir,
+      "raw_pkg",
+      Some(shim_dir),
+      shim_cli.GleamShim,
+    )
+  assert string.contains(new_msg, "Created companion shim")
+  let generated_gleam =
+    filepath.join(shim_dir, "src/gekko_raw_pkg/raw/io.gleam")
+  let assert Ok(content) = simplifile.read(generated_gleam)
+  assert string.contains(content, "import raw/io")
+  assert string.contains(content, "/// @patch(\"raw/io.read_txt\")")
+  assert string.contains(content, "/// @patch(\"raw/io.ok_check\")")
+  assert string.contains(content, "Result(String, io.IoErr)")
+
+  // Generated companion repo should pass `gleam check` cleanly
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_raw_pkg\"\nversion = \"0.1.0\"\n[dependencies]\nraw_pkg = { path = \"../raw_pkg\" }\n[tools.gekko.shim_for]\npackage = \"raw_pkg\"\nversion = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  let gchk = cmd.run("gleam", ["check"], shim_dir)
+  assert gchk.exit_code == 0
+
+  // 2. inspect_package counts Gleam patches
+  let assert Ok(report) = shim_cli.inspect_package(shim_dir, None)
+  assert string.contains(
+    report,
+    "Patched declarations: 2 (0 types, 2 functions)",
+  )
+  assert string.contains(report, "Missing external functions: none")
+
+  // 3. patch_decl_with_style in-app scaffolds src/my_app/shims/raw/io.gleam
+  let assert Ok(_) =
+    shim_cli.patch_decl_with_style(
+      app_dir,
+      "raw_pkg:raw/io.ok_check",
+      shim_cli.GleamShim,
+    )
+  let app_shim = filepath.join(app_dir, "src/my_app/shims/raw/io.gleam")
+  let assert Ok(app_shim_src) = simplifile.read(app_shim)
+  assert string.contains(
+    app_shim_src,
+    "/// @patch(\"raw_pkg:raw/io.ok_check\")",
+  )
+  let gchk2 = cmd.run("gleam", ["check"], app_dir)
+  assert gchk2.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+pub fn gleam_patch_combined_external_and_same_basename_test() {
+  let base = "build/test_fixtures/gleam_patch_ext_combo"
+  let up_dir = filepath.join(base, "upstream")
+  let app_dir = filepath.join(base, "my_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src/shims/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      app_dir,
+      "moonbit/up_ffi",
+    ))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "test"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/fs.gleam"),
+      contents: "pub type Tag { MkTag(label: String) }
+
+@external(erlang, \"up_ffi\", \"eq_wrap\")
+pub fn eq_wrap(a: k, b: k) -> Tag
+
+@external(erlang, \"up_ffi\", \"direct_eq\")
+pub fn direct_eq(a: k, b: k) -> Bool
+",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"my_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "moonbit/up_ffi/up_ffi.mbt"),
+      contents: "///|\npub fn[K : Eq] eq_check(a : K, b : K) -> Bool {\n  a == b\n}\n",
+    )
+    == Ok(Nil)
+  // Combined @patch + @external(moonbit, ...) directly alongside same-basename import
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/shims/up/fs.gleam"),
+      contents: "import up/fs.{type Tag, MkTag}
+
+/// @external(moonbit, \"up_ffi\", \"eq_check\")
+/// @patch(\"upstream:up/fs.direct_eq\")
+pub fn direct_eq_impl(a: k, b: k) -> Bool {
+  let _ = a
+  let _ = b
+  panic as \"ffi\"
+}
+
+/// @patch(\"upstream:up/fs.eq_wrap\")
+pub fn eq_wrap_impl(a: k, b: k) -> Tag {
+  case direct_eq_impl(a, b) {
+    True -> MkTag(\"same\")
+    False -> MkTag(\"diff\")
+  }
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/my_app.gleam"),
+      contents: "import up/fs
+pub fn run() -> fs.Tag {
+  fs.eq_wrap(1, 1)
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "test/my_app_test.gleam"),
+      contents: "import my_app
+import up/fs.{MkTag}
+pub fn eq_wrap_test() {
+  assert my_app.run() == MkTag(\"same\")
+  assert fs.eq_wrap(1, 2) == MkTag(\"diff\")
+  assert fs.direct_eq(5, 5) == True
+  assert fs.direct_eq(5, 6) == False
+}
+",
+    )
+    == Ok(Nil)
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Ok(_) = workspace.transpile_project(app_dir, out_dir)
+  let chk =
+    cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
+  assert chk.exit_code == 0
+  assert !string.contains(chk.output, "Warning:")
+  let tst = cmd.run("moon", ["test", "--target", "wasm"], out_dir)
+  assert tst.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+fn is_error(res: Result(a, b)) -> Bool {
+  case res {
+    Ok(_) -> False
+    Error(_) -> True
+  }
 }

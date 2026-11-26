@@ -23,7 +23,7 @@ import lower/ir.{
 import lower/ir_util
 import lower/mangle
 import moonbit/ffi_meta.{type FfiMetadata}
-import project/prepass.{PackageCall, Patched, WasmImport}
+import project/prepass.{GleamPatch, PackageCall, Patched, WasmImport}
 
 import emit/moonbit_decl.{
   type EmitCtx, EmitCtx, add_gprelude_import, add_module_import,
@@ -119,6 +119,15 @@ fn emit_module_inner(
       }
     })
 
+  let own_pkg_dir = case dict.get(module_pkg_dirs, module.module_name) {
+    Ok(d) -> d
+    Error(_) -> module.module_name
+  }
+  let own_default_alias = case string.split(own_pkg_dir, "/") |> list.last {
+    Ok(seg) -> seg
+    Error(_) -> own_pkg_dir
+  }
+
   let ctx0 =
     EmitCtx(
       current_module: module.module_name,
@@ -130,7 +139,11 @@ fn emit_module_inner(
       project_bounds:,
       module_pkg_dirs:,
       pkg_to_alias: dict.new(),
-      used_aliases: set.from_list(["gprelude"]),
+      used_aliases: set.from_list([
+        "gprelude",
+        own_default_alias,
+        mangle.mangle_ident(own_default_alias),
+      ]),
     )
 
   let #(raw_type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
@@ -341,6 +354,17 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
         <> call_args
         <> ")\n}"
       #(stub_decl <> "\n\n" <> wrapper, ctx_stub)
+    }
+
+    Some(GleamPatch(src_mod, src_fn)) -> {
+      let msg =
+        escape_plain_string(
+          "Unspliced Gleam patch " <> src_mod <> "." <> src_fn,
+        )
+      #(
+        "///|\n" <> header <> " {\n  @prelude.abort(\"" <> msg <> "\")\n}",
+        ctx2,
+      )
     }
 
     None -> {

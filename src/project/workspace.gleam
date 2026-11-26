@@ -14,6 +14,7 @@ import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table
 import lower/desugar
+import lower/gleam_patch
 import lower/ir as lower_ir
 import lower/ir_util
 import lower/mangle
@@ -269,6 +270,11 @@ pub fn transpile_project_with_tests(
       desugar.desugar_module(ast_mod, table, mod_name)
       |> tco.optimize_module
     })
+
+  use ir_modules <- result.try(gleam_patch.splice_gleam_patches(
+    ir_modules,
+    table,
+  ))
 
   let project_bounds =
     trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)

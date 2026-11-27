@@ -1,10 +1,12 @@
 import filepath
 import gekko
+import gleam/dict
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
 import moonbit/bindgen
+import moonbit/bindgen_adapter.{BindOptions}
 import moonbit/ffi_meta
 import moonbit/mbti
 import moonbit/syntax
@@ -1093,5 +1095,320 @@ pub fn moonbit_lsp_workspace_moon_work_test() {
   assert simplifile.read(filepath.join(root, "moon.work")) == Ok(custom_work)
 
   let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn mbti_suberror_and_bindgen_options_unit_test() {
+  let mbti_src =
+    "package \"moonbitlang/core/json\"\n\n"
+    <> "pub(all) suberror ParseError {\n"
+    <> "  InvalidChar(Position, Char)\n"
+    <> "  InvalidEof\n"
+    <> "}\n\n"
+    <> "pub(all) struct Position {\n"
+    <> "  line : Int32\n"
+    <> "  column : Int32\n"
+    <> "}\n\n"
+    <> "pub enum Json {\n"
+    <> "  Null\n"
+    <> "  Number(Double, repr~ : String?)\n"
+    <> "  String(String)\n"
+    <> "}\n\n"
+    <> "pub fn parse(StringView, preserve_number_repr? : Bool) -> Json raise ParseError\n"
+    <> "pub fn Json::stringify(Json) -> String\n"
+    <> "pub fn unused_helper() -> Unit\n"
+
+  let assert Ok(parsed) = mbti.parse_mbti(mbti_src)
+  let assert Ok(parse_fn) =
+    list.find(parsed.functions, fn(f) { f.name == "parse" })
+  assert parse_fn.raises == True
+  assert parse_fn.raise_type == Some(mbti.MbtiNamed(None, "ParseError", []))
+
+  let assert Ok(err_td) =
+    list.find(parsed.types, fn(td) { td.name == "ParseError" })
+  let assert mbti.MbtiEnum(public_all: True, is_suberror: True, variants:) =
+    err_td.kind
+  assert list.length(variants) == 2
+
+  let res =
+    bindgen.generate_bindings_with_options(
+      parsed,
+      "demo",
+      "ffi/json",
+      "demo_mbt",
+      BindOptions(
+        only: ["parse", "Json::stringify", "Json", "ParseError"],
+        map_types: dict.from_list([
+          #("Json", #("gleam/json", "Json")),
+          #("Char", #("", "UtfCodepoint")),
+        ]),
+        typed_errors: True,
+        adapter_name: Some("custom_json_adapter"),
+      ),
+    )
+
+  assert res.adapter_pkg_dir == Some("custom_json_adapter")
+  assert string.contains(res.gleam_source, "import gleam/json.{type Json}")
+  assert !string.contains(res.gleam_source, "pub type Json\n")
+  assert !string.contains(res.gleam_source, "unused_helper")
+  assert string.contains(
+    res.gleam_source,
+    "pub fn parse(arg0: String, preserve_number_repr: Option(Bool)) -> Result(Json, ParseError)",
+  )
+  assert string.contains(res.gleam_source, "pub fn match_json(")
+  assert string.contains(res.gleam_source, "pub fn match_parse_error(")
+  let assert Some(mbt_src) = res.adapter_mbt_source
+  assert string.contains(
+    mbt_src,
+    ") -> Result[@moonbitlang_core_json.Json, @moonbitlang_core_json.ParseError]",
+  )
+  assert string.contains(
+    mbt_src,
+    "@moonbitlang_core_json.Number(v0, repr=v1) => on_number(v0, v1)",
+  )
+  assert string.contains(
+    mbt_src,
+    "@moonbitlang_core_json.InvalidEof => on_invalid_eof()",
+  )
+  assert string.contains(mbt_src, "pub fn[Ret] match_json(")
+  Nil
+}
+
+pub fn moonbit_bindgen_gprelude_and_builtin_e2e_test() {
+  let root = "build/test_fixtures/bindgen_gp_e2e"
+  let out_dir = "build/test_fixtures/bindgen_gp_mbt"
+  let info_dir = "build/test_fixtures/bindgen_gp_info"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src/gleam"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"bindgen_gp\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/gleam/option.gleam"),
+      contents: "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+        <> "pub type Option(a) {\n  Some(a)\n  None\n}\n\n"
+        <> "pub fn is_some(o: Option(a)) -> Bool {\n  case o {\n    Some(_) -> True\n    None -> False\n  }\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_gp.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) =
+    bindgen.bind_package_with_options(
+      root,
+      "moonbitlang/core/builtin",
+      Some("ffi/mbuiltin"),
+      info_dir,
+      BindOptions(
+        only: ["String::to_lower", "Int64::to_string", "println"],
+        map_types: dict.new(),
+        typed_errors: False,
+        adapter_name: Some("gp_builtin_adapter"),
+      ),
+    )
+
+  let assert Ok(_) =
+    bindgen.bind_package_with_options(
+      root,
+      "gprelude",
+      Some("ffi/gprelude"),
+      info_dir,
+      BindOptions(
+        only: [
+          "Dynamic",
+          "to_dynamic",
+          "gleam_inspect",
+          "BitArray::from_string",
+        ],
+        map_types: dict.new(),
+        typed_errors: False,
+        adapter_name: Some("gp_gprelude_adapter"),
+      ),
+    )
+
+  let main_src =
+    "import ffi/gprelude as mgp\n"
+    <> "import ffi/mbuiltin as mb\n"
+    <> "import gleam/option.{None}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let dyn = mgp.to_dynamic(42)\n"
+    <> "  let is_42 = mgp.match_dynamic(\n"
+    <> "    dyn,\n"
+    <> "    fn() { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(n) { n == 42 },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "    fn(_) { False },\n"
+    <> "  )\n"
+    <> "  assert is_42\n"
+    <> "  assert mgp.gleam_inspect(42) == \"42\"\n"
+    <> "  assert mgp.from_string(\"ok\") == <<\"ok\":utf8>>\n"
+    <> "  mb.println(mb.string_to_lower(\"GP_OK:\") <> mb.int64_to_string(42, None))\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_gp.gleam"),
+      contents: main_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let check_moon =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_moon.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "bindgen_gp", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "gp_ok:42")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_dir)
+  Nil
+}
+
+pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
+  let root = "build/test_fixtures/bindgen_json_hm_e2e"
+  let out_dir = "build/test_fixtures/bindgen_json_hm_mbt"
+  let info_dir = "build/test_fixtures/bindgen_json_hm_info"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src/gleam"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"bindgen_jh\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/gleam/option.gleam"),
+      contents: "/// @external_type(moonbit, \"builtin\", \"Option\")\n"
+        <> "pub type Option(a) {\n  Some(a)\n  None\n}\n\n"
+        <> "pub fn is_some(o: Option(a)) -> Bool {\n  case o {\n    Some(_) -> True\n    None -> False\n  }\n}\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_jh.gleam"),
+      contents: "pub fn main() -> Nil {\n  Nil\n}\n",
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) =
+    bindgen.bind_package_with_options(
+      root,
+      "moonbitlang/core/immut/hashmap",
+      Some("ffi/hashmap"),
+      info_dir,
+      BindOptions(
+        only: ["HashMap::new", "HashMap::add", "HashMap::get", "HashMap::fold"],
+        map_types: dict.new(),
+        typed_errors: False,
+        adapter_name: Some("jh_hashmap_adapter"),
+      ),
+    )
+
+  let assert Ok(_) =
+    bindgen.bind_package_with_options(
+      root,
+      "moonbitlang/core/json",
+      Some("ffi/json"),
+      info_dir,
+      BindOptions(
+        only: ["parse", "Json::stringify", "Json", "ParseError"],
+        map_types: dict.new(),
+        typed_errors: True,
+        adapter_name: Some("jh_json_adapter"),
+      ),
+    )
+
+  let main_src =
+    "import ffi/hashmap as mhm\n"
+    <> "import ffi/json as mjson\n"
+    <> "import gleam/option.{None, Some}\n\n"
+    <> "pub fn main() -> Nil {\n"
+    <> "  let hm = mhm.add(mhm.add(mhm.new(), \"a\", 10), \"b\", 20)\n"
+    <> "  assert mhm.get(hm, \"a\") == Some(10)\n"
+    <> "  let total = mhm.fold(hm, 0, fn(acc, _k, v) { acc + v })\n"
+    <> "  assert total == 30\n"
+    <> "  let assert Ok(j) = mjson.parse(\"\\\"hi\\\"\", None, None, None)\n"
+    <> "  let s = mjson.match_json(\n"
+    <> "    j,\n"
+    <> "    fn() { \"null\" },\n"
+    <> "    fn() { \"true\" },\n"
+    <> "    fn() { \"false\" },\n"
+    <> "    fn(_, _) { \"num\" },\n"
+    <> "    fn(str) { str },\n"
+    <> "    fn(_) { \"arr\" },\n"
+    <> "    fn(_) { \"obj\" },\n"
+    <> "  )\n"
+    <> "  assert s == \"hi\"\n"
+    <> "  let assert Error(err) = mjson.parse(\"{\", None, None, None)\n"
+    <> "  let err_tag = mjson.match_parse_error(\n"
+    <> "    err,\n"
+    <> "    fn(_, _) { \"char\" },\n"
+    <> "    fn() { \"eof\" },\n"
+    <> "    fn(_, _) { \"num\" },\n"
+    <> "    fn(_) { \"esc\" },\n"
+    <> "    fn(_, _) { \"dup\" },\n"
+    <> "    fn() { \"depth\" },\n"
+    <> "  )\n"
+    <> "  assert err_tag == \"eof\"\n"
+    <> "  let _ = echo total\n"
+    <> "  Nil\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/bindgen_jh.gleam"),
+      contents: main_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+
+  let check_moon =
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert check_moon.exit_code == 0
+
+  let run_wasm =
+    cmd.run(
+      command: "moon",
+      args: ["run", "bindgen_jh", "--target", "wasm"],
+      cwd: out_dir,
+    )
+  assert run_wasm.exit_code == 0
+  assert string.contains(run_wasm.output, "30")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  let _ = simplifile.delete(file_or_dir_at: info_dir)
   Nil
 }

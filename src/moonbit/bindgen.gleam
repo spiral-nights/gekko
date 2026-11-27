@@ -1,3 +1,4 @@
+import emit/prelude_runtime
 import filepath
 import gleam/dict.{type Dict}
 import gleam/int
@@ -7,20 +8,21 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import moonbit/bindgen_adapter.{
-  type BindContext, type EmittedFn, type ResolvedTypeSpec, type TypeConv,
-  ArrayConv, ArrayViewConv, BindContext, BytesConv, BytesViewConv, CharConv,
-  Direct, EmittedFn, ExternalTypeRef, FixedArrayConv, Float32, FnConv,
+  type BindContext, type BindOptions, type EmittedFn, type ResolvedTypeSpec,
+  type TypeConv, ArrayConv, ArrayViewConv, BindContext, BytesConv, BytesViewConv,
+  CharConv, Direct, EmittedFn, ExternalTypeRef, FixedArrayConv, Float32, FnConv,
   NarrowByte, NarrowInt16, NarrowInt32, NarrowUInt16, NarrowUInt32, OptionConv,
   ReinterpretUInt64, ResolvedTypeSpec, ResultConv, StringViewConv, TupleConv,
-  build_adapter_fn, build_external_type_decls, emit_adapter_helpers,
-  emit_adapter_moon_pkg_with_prelude, format_fn_label, generate_const_items,
-  generate_type_helper_items, int_range_names, last_segment_snake,
-  pick_unique_gleam_name, pkg_to_moon_alias, render_gleam_source,
-  sanitize_gleam_type_var, to_snake_case,
+  build_adapter_fn, build_external_type_decls, default_bind_options,
+  emit_adapter_helpers, emit_adapter_moon_pkg_with_options, format_fn_label,
+  generate_const_items, generate_type_helper_items, int_range_names,
+  is_builtin_pkg, last_segment_snake, pick_unique_gleam_name, pkg_to_moon_alias,
+  render_gleam_source_with_imports, sanitize_gleam_type_var, to_snake_case,
 }
 import moonbit/mbti.{
-  type MbtiFnDecl, type MbtiPackage, type MbtiParam, type MbtiType, MbtiFn,
-  MbtiNamed, MbtiOption, MbtiTraitObject, MbtiTuple,
+  type MbtiConst, type MbtiFnDecl, type MbtiPackage, type MbtiParam,
+  type MbtiType, type MbtiTypeDecl, MbtiFn, MbtiNamed, MbtiOption,
+  MbtiTraitObject, MbtiTuple,
 }
 import project/cmd
 import project/ffi_config
@@ -50,11 +52,12 @@ pub fn generate_bindings(
   project_name: String,
   gleam_module_name: String,
 ) -> BindgenResult {
-  generate_bindings_with_gprelude_mod(
+  generate_bindings_with_options(
     pkg,
     project_name,
     gleam_module_name,
     project_name,
+    default_bind_options(),
   )
 }
 
@@ -66,8 +69,32 @@ pub fn generate_bindings_with_gprelude_mod(
   gleam_module_name: String,
   gprelude_mod_name: String,
 ) -> BindgenResult {
-  let target_alias = pkg_to_moon_alias(pkg.package_name)
-  let adapter_pkg_name = last_segment_snake(pkg.package_name) <> "_adapter"
+  generate_bindings_with_options(
+    pkg,
+    project_name,
+    gleam_module_name,
+    gprelude_mod_name,
+    default_bind_options(),
+  )
+}
+
+/// Like `generate_bindings_with_gprelude_mod`, applying custom `BindOptions`
+/// (`--only`, `--map-type`, `--typed-errors`, `--adapter`).
+pub fn generate_bindings_with_options(
+  pkg: MbtiPackage,
+  project_name: String,
+  gleam_module_name: String,
+  gprelude_mod_name: String,
+  options: BindOptions,
+) -> BindgenResult {
+  let target_alias = case pkg.package_name {
+    "gprelude" -> "gprelude"
+    _ -> pkg_to_moon_alias(pkg.package_name)
+  }
+  let adapter_pkg_name = case options.adapter_name {
+    Some(name) if name != "" -> name
+    _ -> last_segment_snake(pkg.package_name) <> "_adapter"
+  }
 
   let local_type_arities =
     list.fold(pkg.types, dict.new(), fn(acc, td) {
@@ -87,30 +114,42 @@ pub fn generate_bindings_with_gprelude_mod(
       adapter_pkg_name:,
       local_type_arities:,
       import_alias_to_pkg:,
+      options:,
     )
 
   let used_names0 =
     list.fold(pkg.types, set.new(), fn(acc, td) {
-      set.insert(acc, to_snake_case(td.name))
+      let base = to_snake_case(td.name)
+      case dict.has_key(options.map_types, td.name) {
+        True -> acc
+        False -> set.insert(acc, base)
+      }
     })
 
-  // Count method/fn names to disambiguate colliding methods via `<type>_<name>`.
+  // Count method/fn names across all active fns so `--only` keeps consistent disambiguation.
   let active_fns = list.filter(pkg.functions, fn(f) { !f.is_deprecated })
   let fn_name_counts = count_function_base_names(active_fns)
 
+  let selected_fns =
+    list.filter(active_fns, fn(f) { fn_matches_only(f, options.only) })
+  let selected_consts =
+    list.filter(pkg.constants, fn(c) { const_matches_only(c, options.only) })
+  let selected_types =
+    list.filter(pkg.types, fn(td) { type_matches_only(td, options.only) })
+
   let #(rev_items, skipped_fns, used_names1) =
-    generate_fn_items(bctx, active_fns, fn_name_counts, used_names0, [], [])
+    generate_fn_items(bctx, selected_fns, fn_name_counts, used_names0, [], [])
 
   let skipped_deprecated_fns =
     pkg.functions
-    |> list.filter(fn(f) { f.is_deprecated })
+    |> list.filter(fn(f) { f.is_deprecated && fn_matches_only(f, options.only) })
     |> list.map(fn(f) { #(format_fn_label(f), "deprecated") })
 
   let #(const_items, skipped_consts, used_names2) =
-    generate_const_items(bctx, pkg.constants, used_names1, resolve_type)
+    generate_const_items(bctx, selected_consts, used_names1, resolve_type)
 
   let #(struct_enum_items, skipped_struct_items, _used_names3) =
-    generate_type_helper_items(bctx, pkg.types, used_names2, resolve_type)
+    generate_type_helper_items(bctx, selected_types, used_names2, resolve_type)
 
   let all_items =
     list.flatten([
@@ -130,10 +169,15 @@ pub fn generate_bindings_with_gprelude_mod(
   let needs_gprelude = list.any(all_items, fn(it) { it.needs_gprelude })
   let needs_float = list.any(all_items, fn(it) { it.needs_float_pkg })
   let needs_int16 = list.any(all_items, fn(it) { it.needs_int16_pkg })
+  let needs_debug = list.any(all_items, fn(it) { it.needs_debug_pkg })
 
   let used_ext_types =
     list.fold(all_items, dict.new(), fn(acc, it) {
       dict.merge(acc, it.ext_types)
+    })
+  let mapped_imports =
+    list.fold(all_items, set.new(), fn(acc, it) {
+      set.union(acc, it.mapped_imports)
     })
 
   let ext_type_decls = build_external_type_decls(pkg, used_ext_types)
@@ -165,12 +209,13 @@ pub fn generate_bindings_with_gprelude_mod(
         list.append(helper_defs, adapter_fns)
         |> string.join("\n\n")
       let pkg_file =
-        emit_adapter_moon_pkg_with_prelude(
+        emit_adapter_moon_pkg_with_options(
           bctx,
           gprelude_mod_name <> "/gprelude",
           needs_gprelude,
           needs_float,
           needs_int16,
+          needs_debug,
           extra_imports,
         )
       #(Some(adapter_pkg_name), Some(mbt_body <> "\n"), Some(pkg_file))
@@ -178,8 +223,9 @@ pub fn generate_bindings_with_gprelude_mod(
   }
 
   let gleam_source =
-    render_gleam_source(
+    render_gleam_source_with_imports(
       needs_option,
+      mapped_imports,
       ext_type_decls,
       list.map(all_items, fn(it) { it.gleam_stub }),
       all_skipped,
@@ -195,14 +241,79 @@ pub fn generate_bindings_with_gprelude_mod(
   )
 }
 
-/// Resolve `pkg` (path to `.mbti`, `moonbitlang/core/<subpath>`, or local
-/// `moonbit/<pkg>`), run `moon info` if needed, generate Gleam bindings and
-/// any adapter package, and write them into `project_root`.
+/// Parse one `--map-type <MbtName>=<gleam/mod.Type>` argument.
+pub fn parse_map_type_arg(
+  raw: String,
+) -> Result(#(String, #(String, String)), String) {
+  case string.split_once(raw, "=") {
+    Ok(#(mbt_name, target)) if mbt_name != "" && target != "" -> {
+      let mbt_clean = string.trim(mbt_name)
+      let tgt_clean = string.trim(target)
+      case string.split_once(tgt_clean, ".") {
+        Ok(#(mod_path, ty_name)) if mod_path != "" && ty_name != "" ->
+          Ok(#(mbt_clean, #(mod_path, ty_name)))
+        Error(_) -> Ok(#(mbt_clean, #("", tgt_clean)))
+        _ -> Error("Invalid `--map-type` specification: " <> raw)
+      }
+    }
+    _ ->
+      Error(
+        "Invalid `--map-type` specification '"
+        <> raw
+        <> "'. Expected `<MbtType>=<gleam/module.Type>` or `<MbtType>=<BuiltinType>`",
+      )
+  }
+}
+
+fn fn_matches_only(f: MbtiFnDecl, filters: List(String)) -> Bool {
+  case filters {
+    [] -> True
+    _ -> {
+      let label = format_fn_label(f)
+      list.any(filters, fn(pat) {
+        pat == label
+        || case f.owner_type {
+          Some(owner) -> pat == owner <> "::"
+          None -> pat == f.name
+        }
+      })
+    }
+  }
+}
+
+fn const_matches_only(c: MbtiConst, filters: List(String)) -> Bool {
+  filters == [] || list.contains(filters, c.name)
+}
+
+fn type_matches_only(td: MbtiTypeDecl, filters: List(String)) -> Bool {
+  filters == [] || list.contains(filters, td.name)
+}
+
+/// Resolve `pkg` (path to `.mbti`, `moonbitlang/core/<subpath>`, `"gprelude"`,
+/// or local `moonbit/<pkg>`), run `moon info` if needed, generate Gleam bindings
+/// and any adapter package, and write them into `project_root`.
 pub fn bind_package(
   project_root: String,
   pkg: String,
   gleam_module: Option(String),
   out_dir: String,
+) -> Result(BindgenResult, String) {
+  bind_package_with_options(
+    project_root,
+    pkg,
+    gleam_module,
+    out_dir,
+    default_bind_options(),
+  )
+}
+
+/// Like `bind_package`, using explicit `BindOptions`.
+pub fn bind_package_with_options(
+  project_root: String,
+  pkg: String,
+  gleam_module: Option(String),
+  out_dir: String,
+  options: BindOptions,
 ) -> Result(BindgenResult, String) {
   use #(project_name, _) <- result.try(loader.read_project_meta(project_root))
   use #(mbti_source, inferred_default_mod) <- result.try(locate_mbti_source(
@@ -222,11 +333,12 @@ pub fn bind_package(
     ))
     |> option.unwrap(project_name)
   let res =
-    generate_bindings_with_gprelude_mod(
+    generate_bindings_with_options(
       parsed,
       project_name,
       target_mod,
       moon_mod_name,
+      options,
     )
 
   let gleam_dest =
@@ -240,17 +352,72 @@ pub fn bind_package(
         filepath.join(adapter_dir, dir <> ".mbt"),
         mbt_src,
       ))
-      use _ <- result.try(fs.write_text(
-        filepath.join(adapter_dir, "moon.pkg"),
-        pkg_cfg,
-      ))
-      Ok(res)
+      case pkg_cfg {
+        "" -> {
+          let _ =
+            simplifile.delete_file(at: filepath.join(adapter_dir, "moon.pkg"))
+          Ok(res)
+        }
+        _ -> {
+          use _ <- result.try(fs.write_text(
+            filepath.join(adapter_dir, "moon.pkg"),
+            pkg_cfg,
+          ))
+          Ok(res)
+        }
+      }
     }
     _, _, _ -> Ok(res)
   }
 }
 
 fn locate_mbti_source(
+  project_root: String,
+  pkg: String,
+  out_dir: String,
+) -> Result(#(String, String), String) {
+  case pkg == "gprelude" {
+    True -> {
+      let info_dir = filepath.join(out_dir, "_bind_gprelude_info")
+      let gp_dir = filepath.join(info_dir, "gprelude")
+      use _ <- result.try(fs.write_text(
+        filepath.join(info_dir, "moon.mod"),
+        "name = \"__bind_prelude\"\nversion = \"0.1.0\"\n",
+      ))
+      use _ <- result.try(fs.write_text(
+        filepath.join(gp_dir, "moon.pkg"),
+        prelude_runtime.moon_pkg(),
+      ))
+      use _ <- result.try(fs.write_text(
+        filepath.join(gp_dir, "gprelude.mbt"),
+        prelude_runtime.gprelude_mbt(),
+      ))
+      let info_res = cmd.run_moon_with_auto_update(["info"], info_dir)
+      case info_res.exit_code {
+        0 -> {
+          let gp_mbti = filepath.join(gp_dir, "pkg.generated.mbti")
+          use raw_src <- result.try(read_file_err(gp_mbti))
+          let normalized =
+            string.replace(
+              raw_src,
+              "package \"__bind_prelude/gprelude\"",
+              "package \"gprelude\"",
+            )
+          let _ = simplifile.delete(file_or_dir_at: info_dir)
+          Ok(#(normalized, "ffi/gprelude"))
+        }
+        _ ->
+          Error(
+            "`moon info` failed while inspecting package 'gprelude':\n"
+            <> info_res.output,
+          )
+      }
+    }
+    False -> locate_non_prelude_mbti_source(project_root, pkg, out_dir)
+  }
+}
+
+fn locate_non_prelude_mbti_source(
   project_root: String,
   pkg: String,
   out_dir: String,
@@ -452,6 +619,22 @@ fn generate_fn_items(
   }
 }
 
+fn is_supported_trait_bound(bound: String) -> Bool {
+  case bound {
+    "Eq"
+    | "Hash"
+    | "Show"
+    | "Compare"
+    | "Debug"
+    | "@debug.Debug"
+    | "ToDynamic"
+    | "@gprelude.ToDynamic"
+    | "GleamInspect"
+    | "@gprelude.GleamInspect" -> True
+    _ -> False
+  }
+}
+
 fn convert_fn_decl(
   bctx: BindContext,
   f: MbtiFnDecl,
@@ -462,22 +645,20 @@ fn convert_fn_decl(
     True -> Error("async functions are not supported")
     False -> Ok(Nil)
   })
-  use _ <- result.try(case f.poly_raise {
-    True -> Error("polymorphic raise? effects are not supported")
-    False -> Ok(Nil)
-  })
-  use _ <- result.try(case list.find(f.type_params, fn(tp) { tp.1 != [] }) {
-    Ok(#(tp, bounds)) ->
-      Error(
-        "bounded type parameter `"
-        <> tp
-        <> " : "
-        <> string.join(bounds, " + ")
-        <> "`",
-      )
+  let unsupported_tp =
+    list.find_map(f.type_params, fn(tp) {
+      case list.find(tp.1, fn(b) { !is_supported_trait_bound(b) }) {
+        Ok(bad) -> Ok(#(tp.0, bad))
+        Error(_) -> Error(Nil)
+      }
+    })
+  use _ <- result.try(case unsupported_tp {
+    Ok(#(tp, bad)) ->
+      Error("bounded type parameter `" <> tp <> " : " <> bad <> "`")
     Error(_) -> Ok(Nil)
   })
 
+  let any_bound_tp = list.any(f.type_params, fn(tp) { tp.1 != [] })
   let fn_tp_names = list.map(f.type_params, fn(tp) { tp.0 })
   let tp_map =
     list.fold(fn_tp_names, dict.new(), fn(acc, tp) {
@@ -511,6 +692,15 @@ fn convert_fn_decl(
   let resolved_ret_mbti = substitute_self(f.return_type, self_sub)
   use resolved_ret <- result.try(resolve_type(bctx, resolved_ret_mbti, tp_map))
 
+  let resolved_err = case bctx.options.typed_errors && f.raises, f.raise_type {
+    True, Some(err_ty) ->
+      case resolve_type(bctx, err_ty, tp_map) {
+        Ok(es) -> Some(es)
+        Error(_) -> None
+      }
+    _, _ -> None
+  }
+
   let gleam_name = pick_unique_gleam_name(base_gleam_name, used_names)
   let next_used = set.insert(used_names, gleam_name)
 
@@ -522,12 +712,18 @@ fn convert_fn_decl(
     f.owner_type == None
     && !any_labelled_or_opt
     && !f.raises
+    && !f.poly_raise
+    && !any_bound_tp
+    && !is_builtin_pkg(bctx.mbti.package_name)
+    && bctx.mbti.package_name != "gprelude"
     && all_direct_params
     && resolved_ret.conv == Direct
 
-  let gleam_ret_ty = case f.raises {
-    True -> "Result(" <> resolved_ret.gleam_ty <> ", String)"
-    False -> resolved_ret.gleam_ty
+  let gleam_ret_ty = case f.raises, resolved_err {
+    True, Some(es) ->
+      "Result(" <> resolved_ret.gleam_ty <> ", " <> es.gleam_ty <> ")"
+    True, None -> "Result(" <> resolved_ret.gleam_ty <> ", String)"
+    False, _ -> resolved_ret.gleam_ty
   }
 
   let gleam_param_sig =
@@ -575,27 +771,40 @@ fn convert_fn_decl(
     needs_gprelude,
     needs_float,
     needs_int16,
+    needs_debug,
     extra_imports,
   ) = case direct_ok {
-    True -> #(None, set.new(), False, False, False, dict.new())
+    True -> #(None, set.new(), False, False, False, False, dict.new())
     False ->
       build_adapter_fn(
         bctx,
         f,
         gleam_name,
-        fn_tp_names,
+        f.type_params,
         param_names,
         resolved_params,
         resolved_ret,
+        resolved_err,
       )
   }
 
-  let needs_option =
-    resolved_ret.needs_option
-    || list.any(resolved_params, fn(rp) { rp.1.needs_option })
+  let err_specs = case resolved_err {
+    Some(e) -> [e]
+    None -> []
+  }
+  let all_specs = [
+    resolved_ret,
+    ..list.append(list.map(resolved_params, fn(rp) { rp.1 }), err_specs)
+  ]
+
+  let needs_option = list.any(all_specs, fn(s) { s.needs_option })
   let ext_types =
-    list.fold(resolved_params, resolved_ret.used_external_types, fn(acc, rp) {
-      dict.merge(acc, rp.1.used_external_types)
+    list.fold(all_specs, dict.new(), fn(acc, s) {
+      dict.merge(acc, s.used_external_types)
+    })
+  let mapped_imports =
+    list.fold(all_specs, set.new(), fn(acc, s) {
+      set.union(acc, s.mapped_imports)
     })
 
   Ok(#(
@@ -606,8 +815,10 @@ fn convert_fn_decl(
       needs_gprelude:,
       needs_float_pkg: needs_float,
       needs_int16_pkg: needs_int16,
+      needs_debug_pkg: needs_debug,
       helper_kinds:,
       ext_types:,
+      mapped_imports:,
       extra_imports:,
     ),
     next_used,
@@ -734,6 +945,8 @@ fn resolve_type(
         needs_float_pkg: spec.needs_float_pkg,
         needs_int16_pkg: spec.needs_int16_pkg,
         used_external_types: spec.used_external_types,
+        mapped_imports: spec.mapped_imports,
+        extra_pkgs: spec.extra_pkgs,
       ))
     }
 
@@ -759,11 +972,17 @@ fn resolve_type(
         used_external_types: list.fold(specs, dict.new(), fn(acc, s) {
           dict.merge(acc, s.used_external_types)
         }),
+        mapped_imports: list.fold(specs, set.new(), fn(acc, s) {
+          set.union(acc, s.mapped_imports)
+        }),
+        extra_pkgs: list.fold(specs, dict.new(), fn(acc, s) {
+          dict.merge(acc, s.extra_pkgs)
+        }),
       ))
     }
 
-    MbtiFn(is_async:, params:, return_type:, raises:, poly_raise:) -> {
-      use _ <- result.try(case is_async || raises || poly_raise {
+    MbtiFn(is_async:, params:, return_type:, raises:, poly_raise: _) -> {
+      use _ <- result.try(case is_async || raises {
         True -> Error("effectful or async callback type")
         False -> Ok(Nil)
       })
@@ -775,6 +994,14 @@ fn resolve_type(
       let ext =
         list.fold(p_specs, r_spec.used_external_types, fn(acc, s) {
           dict.merge(acc, s.used_external_types)
+        })
+      let mapped =
+        list.fold(p_specs, r_spec.mapped_imports, fn(acc, s) {
+          set.union(acc, s.mapped_imports)
+        })
+      let extras =
+        list.fold(p_specs, r_spec.extra_pkgs, fn(acc, s) {
+          dict.merge(acc, s.extra_pkgs)
         })
       Ok(ResolvedTypeSpec(
         gleam_ty: "fn("
@@ -799,6 +1026,8 @@ fn resolve_type(
         needs_int16_pkg: r_spec.needs_int16_pkg
           || list.any(p_specs, fn(s) { s.needs_int16_pkg }),
         used_external_types: ext,
+        mapped_imports: mapped,
+        extra_pkgs: extras,
       ))
     }
 
@@ -828,6 +1057,8 @@ fn resolve_named_type(
             needs_float_pkg: False,
             needs_int16_pkg: False,
             used_external_types: dict.new(),
+            mapped_imports: set.new(),
+            extra_pkgs: dict.new(),
           ))
         Error(_) -> resolve_concrete_named(bctx, None, name, args, tp_map)
       }
@@ -864,6 +1095,8 @@ fn resolve_concrete_named(
         needs_float_pkg: False,
         needs_int16_pkg: True,
         used_external_types: dict.new(),
+        mapped_imports: set.new(),
+        extra_pkgs: dict.new(),
       ))
     None, "UInt16", [] -> simple_spec("Int", "Int64", "UInt16", NarrowUInt16)
     None, "Byte", [] -> simple_spec("Int", "Int64", "Byte", NarrowByte)
@@ -880,10 +1113,64 @@ fn resolve_concrete_named(
         needs_float_pkg: True,
         needs_int16_pkg: False,
         used_external_types: dict.new(),
+        mapped_imports: set.new(),
+        extra_pkgs: dict.new(),
       ))
     None, "StringView", [] ->
       simple_spec("String", "String", "StringView", StringViewConv)
-    None, "Char", [] -> simple_spec("String", "String", "Char", CharConv)
+    None, "Char", [] ->
+      case dict.get(bctx.options.map_types, "Char") {
+        Ok(#("", ty_name)) -> simple_spec(ty_name, "Char", "Char", Direct)
+        Ok(#(mod_path, ty_name)) ->
+          Ok(ResolvedTypeSpec(
+            gleam_ty: ty_name,
+            adapter_ty: "Char",
+            mbt_ty: "Char",
+            conv: Direct,
+            needs_option: False,
+            needs_gprelude: False,
+            needs_float_pkg: False,
+            needs_int16_pkg: False,
+            used_external_types: dict.new(),
+            mapped_imports: set.from_list([#(mod_path, ty_name)]),
+            extra_pkgs: dict.new(),
+          ))
+        Error(_) -> simple_spec("String", "String", "Char", CharConv)
+      }
+    None, "BitArray", [] if bctx.mbti.package_name == "gprelude" ->
+      Ok(ResolvedTypeSpec(
+        gleam_ty: "BitArray",
+        adapter_ty: "@gprelude.BitArray",
+        mbt_ty: "@gprelude.BitArray",
+        conv: Direct,
+        needs_option: False,
+        needs_gprelude: True,
+        needs_float_pkg: False,
+        needs_int16_pkg: False,
+        used_external_types: dict.new(),
+        mapped_imports: set.new(),
+        extra_pkgs: dict.new(),
+      ))
+    None, "GList", [inner] if bctx.mbti.package_name == "gprelude" -> {
+      use s <- result.try(resolve_type(bctx, inner, tp_map))
+      use _ <- result.try(case s.conv == Direct {
+        True -> Ok(Nil)
+        False -> Error("gprelude GList with converted element type")
+      })
+      Ok(ResolvedTypeSpec(
+        gleam_ty: "List(" <> s.gleam_ty <> ")",
+        adapter_ty: "@gprelude.GList[" <> s.adapter_ty <> "]",
+        mbt_ty: "@gprelude.GList[" <> s.mbt_ty <> "]",
+        conv: Direct,
+        needs_option: s.needs_option,
+        needs_gprelude: True,
+        needs_float_pkg: s.needs_float_pkg,
+        needs_int16_pkg: s.needs_int16_pkg,
+        used_external_types: s.used_external_types,
+        mapped_imports: s.mapped_imports,
+        extra_pkgs: s.extra_pkgs,
+      ))
+    }
     None, "Bytes", [] ->
       Ok(ResolvedTypeSpec(
         gleam_ty: "BitArray",
@@ -895,6 +1182,8 @@ fn resolve_concrete_named(
         needs_float_pkg: False,
         needs_int16_pkg: False,
         used_external_types: dict.new(),
+        mapped_imports: set.new(),
+        extra_pkgs: dict.new(),
       ))
     None, "BytesView", [] ->
       Ok(ResolvedTypeSpec(
@@ -907,6 +1196,8 @@ fn resolve_concrete_named(
         needs_float_pkg: False,
         needs_int16_pkg: False,
         used_external_types: dict.new(),
+        mapped_imports: set.new(),
+        extra_pkgs: dict.new(),
       ))
 
     None, "Array", [inner] -> {
@@ -921,6 +1212,8 @@ fn resolve_concrete_named(
         needs_float_pkg: s.needs_float_pkg,
         needs_int16_pkg: s.needs_int16_pkg,
         used_external_types: s.used_external_types,
+        mapped_imports: s.mapped_imports,
+        extra_pkgs: s.extra_pkgs,
       ))
     }
 
@@ -936,6 +1229,8 @@ fn resolve_concrete_named(
         needs_float_pkg: s.needs_float_pkg,
         needs_int16_pkg: s.needs_int16_pkg,
         used_external_types: s.used_external_types,
+        mapped_imports: s.mapped_imports,
+        extra_pkgs: s.extra_pkgs,
       ))
     }
 
@@ -951,6 +1246,8 @@ fn resolve_concrete_named(
         needs_float_pkg: s.needs_float_pkg,
         needs_int16_pkg: s.needs_int16_pkg,
         used_external_types: s.used_external_types,
+        mapped_imports: s.mapped_imports,
+        extra_pkgs: s.extra_pkgs,
       ))
     }
 
@@ -976,6 +1273,8 @@ fn resolve_concrete_named(
           ok_s.used_external_types,
           err_s.used_external_types,
         ),
+        mapped_imports: set.union(ok_s.mapped_imports, err_s.mapped_imports),
+        extra_pkgs: dict.merge(ok_s.extra_pkgs, err_s.extra_pkgs),
       ))
     }
 
@@ -1012,7 +1311,7 @@ fn resolve_opaque_nominal(
       <> "]"
   }
 
-  use #(pkg_path, pkg_alias, gleam_name) <- result.try(case qualifier {
+  use #(raw_pkg_path, raw_alias, gleam_name) <- result.try(case qualifier {
     Some(q) ->
       case dict.get(bctx.import_alias_to_pkg, q) {
         Ok(full_pkg) -> Ok(#(full_pkg, pkg_to_moon_alias(full_pkg), name))
@@ -1030,29 +1329,74 @@ fn resolve_opaque_nominal(
       }
   })
 
-  let ext_ref =
-    ExternalTypeRef(
-      gleam_name:,
-      pkg_path:,
-      mbt_name: name,
-      arity: list.length(arg_specs),
-    )
-  let base_ext = dict.from_list([#(gleam_name, ext_ref)])
-  let merged_ext =
-    list.fold(arg_specs, base_ext, fn(acc, s) {
+  let pkg_path = case is_builtin_pkg(raw_pkg_path) {
+    True -> "builtin"
+    False -> raw_pkg_path
+  }
+  let qual_prefix = case is_builtin_pkg(pkg_path) {
+    True -> ""
+    False -> "@" <> raw_alias <> "."
+  }
+  let arg_ext =
+    list.fold(arg_specs, dict.new(), fn(acc, s) {
       dict.merge(acc, s.used_external_types)
     })
+  let arg_mapped =
+    list.fold(arg_specs, set.new(), fn(acc, s) {
+      set.union(acc, s.mapped_imports)
+    })
+  let arg_extra =
+    list.fold(arg_specs, dict.new(), fn(acc, s) {
+      dict.merge(acc, s.extra_pkgs)
+    })
+  let self_extra = case
+    pkg_path == bctx.mbti.package_name
+    || is_builtin_pkg(pkg_path)
+    || pkg_path == "gprelude"
+  {
+    True -> arg_extra
+    False -> dict.insert(arg_extra, pkg_path, raw_alias)
+  }
+
+  let #(final_gleam_ty, merged_ext, mapped_imports) = case
+    dict.get(bctx.options.map_types, name)
+  {
+    Ok(#(map_mod, map_ty_name)) -> {
+      let next_mapped = case map_mod {
+        "" -> arg_mapped
+        _ -> set.insert(arg_mapped, #(map_mod, map_ty_name))
+      }
+      #(map_ty_name <> gleam_suffix, arg_ext, next_mapped)
+    }
+    Error(_) -> {
+      let ext_ref =
+        ExternalTypeRef(
+          gleam_name:,
+          pkg_path:,
+          mbt_name: name,
+          arity: list.length(arg_specs),
+        )
+      #(
+        gleam_name <> gleam_suffix,
+        dict.insert(arg_ext, gleam_name, ext_ref),
+        arg_mapped,
+      )
+    }
+  }
 
   Ok(ResolvedTypeSpec(
-    gleam_ty: gleam_name <> gleam_suffix,
-    adapter_ty: "@" <> pkg_alias <> "." <> name <> mbt_suffix,
-    mbt_ty: "@" <> pkg_alias <> "." <> name <> mbt_suffix,
+    gleam_ty: final_gleam_ty,
+    adapter_ty: qual_prefix <> name <> mbt_suffix,
+    mbt_ty: qual_prefix <> name <> mbt_suffix,
     conv: Direct,
     needs_option: list.any(arg_specs, fn(s) { s.needs_option }),
-    needs_gprelude: list.any(arg_specs, fn(s) { s.needs_gprelude }),
+    needs_gprelude: pkg_path == "gprelude"
+      || list.any(arg_specs, fn(s) { s.needs_gprelude }),
     needs_float_pkg: list.any(arg_specs, fn(s) { s.needs_float_pkg }),
     needs_int16_pkg: list.any(arg_specs, fn(s) { s.needs_int16_pkg }),
     used_external_types: merged_ext,
+    mapped_imports:,
+    extra_pkgs: self_extra,
   ))
 }
 
@@ -1092,6 +1436,8 @@ fn simple_spec(
     needs_float_pkg: False,
     needs_int16_pkg: False,
     used_external_types: dict.new(),
+    mapped_imports: set.new(),
+    extra_pkgs: dict.new(),
   ))
 }
 

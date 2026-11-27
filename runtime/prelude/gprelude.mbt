@@ -1396,6 +1396,46 @@ pub impl[T : ToDynamic] ToDynamic for GList[T] with to_dynamic(self) {
 }
 
 ///|
+pub impl[K : GleamInspect, V : GleamInspect] GleamInspect for @immut_hashmap.HashMap[
+  K,
+  V,
+] with gleam_inspect(self) {
+  let entries : Array[(String, String)] = []
+  self.each(fn(k, v) {
+    entries.push(
+      (GleamInspect::gleam_inspect(k), GleamInspect::gleam_inspect(v)),
+    )
+  })
+  entries.sort_by(fn(a, b) { a.0.compare(b.0) })
+  let buf = StringBuilder()
+  buf.write_string("dict.from_list([")
+  let mut first = true
+  for entry in entries {
+    if !first {
+      buf.write_string(", ")
+    }
+    first = false
+    buf.write_string("#(")
+    buf.write_string(entry.0)
+    buf.write_string(", ")
+    buf.write_string(entry.1)
+    buf.write_char(')')
+  }
+  buf.write_string("])")
+  buf.to_string()
+}
+
+///|
+pub fn[T : ToDynamic] to_dynamic(val : T) -> Dynamic {
+  ToDynamic::to_dynamic(val)
+}
+
+///|
+pub fn[T : GleamInspect] gleam_inspect(val : T) -> String {
+  GleamInspect::gleam_inspect(val)
+}
+
+///|
 pub fn[T : GleamInspect] echo_val(val : T, loc : String, msg : String) -> T {
   let header = if msg == "" { loc } else { loc + " " + msg }
   @prelude.eprintln(header)

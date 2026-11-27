@@ -1,5 +1,6 @@
 import filepath
 import gekko
+import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -745,6 +746,34 @@ pub fn cli_parse_args_help_and_version_test() {
       package: "pkg",
       module: None,
       out: None,
+      only: [],
+      map_types: dict.new(),
+      typed_errors: False,
+      adapter: None,
+    ))
+  assert gekko.parse_args([
+      "moonbit",
+      "bind",
+      "moonbitlang/core/json",
+      "--only",
+      "parse",
+      "--only",
+      "Json",
+      "--map-type",
+      "Json=gleam/json.Json",
+      "--typed-errors",
+      "--adapter",
+      "json_adapter",
+    ])
+    == Ok(gekko.MoonbitBindAction(
+      root: ".",
+      package: "moonbitlang/core/json",
+      module: None,
+      out: None,
+      only: ["parse", "Json"],
+      map_types: dict.from_list([#("Json", #("gleam/json", "Json"))]),
+      typed_errors: True,
+      adapter: Some("json_adapter"),
     ))
   assert gekko.parse_args(["shim", "inspect", "simplifile", "--root", "app"])
     == Ok(gekko.ShimInspectAction(root: "app", package: Some("simplifile")))

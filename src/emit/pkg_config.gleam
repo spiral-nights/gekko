@@ -12,7 +12,15 @@ pub fn module_to_pkg_dir(module_name: String) -> String {
     "gprelude" -> "mod_gprelude"
     "prelude" -> "mod_prelude"
     "gprelude/" <> rest -> "mod_gprelude/" <> rest
-    _ -> module_name
+    _ ->
+      case
+        string.ends_with(module_name, "/gprelude"),
+        string.ends_with(module_name, "/prelude")
+      {
+        True, _ -> string.drop_end(module_name, 9) <> "/mod_gprelude"
+        False, True -> string.drop_end(module_name, 8) <> "/mod_prelude"
+        False, False -> module_name
+      }
   }
 }
 
@@ -95,7 +103,8 @@ pub fn emit_moon_mod_with_deps(
     // - unused_rest_mark / guard_redundant_else: uniform enum & `let` pattern/guard lowering
     // - unused_package / unused_value / unused_constructor / unused_loop_variable: valid Gleam patterns & TCO loops
     // - unresolved_type_variable: unconstrained polymorphic expressions like `let _ = []`
-    <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound\"\n"
+    // - result_error_return: FFI adapters returning Result[T, Suberror] when --typed-errors is enabled
+    <> "warnings = \"-implicit_impl_as_method-unused_rest_mark-unused_package-unused_value-unresolved_type_variable-unused_loop_variable-unused_constructor-guard_redundant_else-unused_trait_bound-result_error_return\"\n"
 
   case deps {
     [] -> base

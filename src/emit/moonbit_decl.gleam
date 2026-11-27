@@ -126,6 +126,7 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
       case
         package == ""
         || package == "builtin"
+        || package == "moonbitlang/core/builtin"
         || package == ctx.current_module
         || defined_in_patch,
         type_name == td.name
@@ -133,7 +134,10 @@ pub fn emit_type_def(td: IrTypeDef, ctx: EmitCtx) -> #(String, EmitCtx) {
         True, True -> #("", ctx)
         _, _ -> {
           let #(target_str, ctx1) = case package {
-            "" | "builtin" -> #(type_name <> generics, ctx)
+            "" | "builtin" | "moonbitlang/core/builtin" -> #(
+              type_name <> generics,
+              ctx,
+            )
             "gprelude" -> #(
               "@gprelude." <> type_name <> generics,
               add_gprelude_import(ctx),
@@ -947,7 +951,9 @@ pub fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
         _, _ ->
           case lookup_external_type(module, name, ctx) {
             Some(ExternalType(package: pkg, type_name: target))
-              if pkg == "" || pkg == "builtin"
+              if pkg == ""
+              || pkg == "builtin"
+              || pkg == "moonbitlang/core/builtin"
             -> {
               let #(arg_strs, ctx1) = map_acc(args, ctx, emit_type)
               let suffix = case arg_strs {
@@ -965,6 +971,35 @@ pub fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
               }
               #("@gprelude." <> target <> suffix, ctx1)
             }
+            Some(ExternalType(package: pkg, type_name: target))
+              if module != ctx.current_module && pkg != module
+            ->
+              case string.contains(pkg, "/") {
+                True -> {
+                  let #(arg_strs, ctx1) = map_acc(args, ctx, emit_type)
+                  let default_alias = mangle.module_to_alias(pkg)
+                  let #(ffi_alias, ctx2) =
+                    register_import(ctx1, pkg, default_alias, default_alias)
+                  let suffix = case arg_strs {
+                    [] -> ""
+                    _ -> "[" <> string.join(arg_strs, ", ") <> "]"
+                  }
+                  #("@" <> ffi_alias <> "." <> target <> suffix, ctx2)
+                }
+                False -> {
+                  let #(arg_strs, ctx1) = map_acc(args, ctx, emit_type)
+                  let #(prefix, ctx2) = {
+                    let #(alias, c) =
+                      add_module_import(ctx1, module, module_alias)
+                    #("@" <> alias <> ".", c)
+                  }
+                  let suffix = case arg_strs {
+                    [] -> ""
+                    _ -> "[" <> string.join(arg_strs, ", ") <> "]"
+                  }
+                  #(prefix <> name <> suffix, ctx2)
+                }
+              }
             _ -> {
               let #(arg_strs, ctx1) = map_acc(args, ctx, emit_type)
               let #(prefix, ctx2) = case module == ctx1.current_module {
@@ -1034,8 +1069,15 @@ pub fn format_function_type_params(
           let has_eq = set.contains(fn_bounds.eq_vars, tp)
           let has_inspect = set.contains(fn_bounds.inspect_vars, tp)
           let has_to_dyn = set.contains(fn_bounds.to_dynamic_vars, tp)
+          let has_show = set.contains(fn_bounds.show_vars, tp)
           let traits =
             []
+            |> fn(ts) {
+              case has_show {
+                True -> ["Show", ..ts]
+                False -> ts
+              }
+            }
             |> fn(ts) {
               case has_to_dyn {
                 True -> ["@gprelude.ToDynamic", ..ts]

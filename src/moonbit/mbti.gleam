@@ -38,7 +38,7 @@ pub type MbtiTypeKind {
     fields: List(MbtiField),
     tuple_fields: List(MbtiType),
   )
-  MbtiEnum(public_all: Bool, variants: List(MbtiVariant))
+  MbtiEnum(public_all: Bool, is_suberror: Bool, variants: List(MbtiVariant))
   MbtiAlias(target: MbtiType)
 }
 
@@ -61,6 +61,7 @@ pub type MbtiFnDecl {
     params: List(MbtiParam),
     return_type: MbtiType,
     raises: Bool,
+    raise_type: Option(MbtiType),
     poly_raise: Bool,
     is_async: Bool,
     is_deprecated: Bool,
@@ -353,6 +354,7 @@ fn parse_type_declaration(
       use td <- result.try(parse_enum_decl(
         body,
         public_all,
+        False,
         decl_lines,
         is_deprecated,
       ))
@@ -365,16 +367,30 @@ fn parse_type_declaration(
 
     _, _, True, _ -> {
       let body = string.trim(string.drop_start(after_vis, 9))
-      let remaining = skip_block_if_open(trimmed, rest)
-      let header = strip_trailing_brace(body)
-      let #(name, type_params, _) = split_name_and_type_params(header)
-      let td =
-        MbtiTypeDecl(name:, type_params:, kind: MbtiOpaque, is_deprecated:)
-      parse_lines(
-        remaining,
-        False,
-        MbtiPackage(..acc, types: [td, ..acc.types]),
-      )
+      case string.ends_with(body, "{") {
+        True -> {
+          let #(decl_lines, remaining) = take_until_closing_brace(rest, [])
+          use td <- result.try(parse_enum_decl(
+            body,
+            public_all,
+            True,
+            decl_lines,
+            is_deprecated,
+          ))
+          parse_lines(
+            remaining,
+            False,
+            MbtiPackage(..acc, types: [td, ..acc.types]),
+          )
+        }
+        False -> {
+          let header = strip_trailing_brace(body)
+          let #(name, type_params, _) = split_name_and_type_params(header)
+          let td =
+            MbtiTypeDecl(name:, type_params:, kind: MbtiOpaque, is_deprecated:)
+          parse_lines(rest, False, MbtiPackage(..acc, types: [td, ..acc.types]))
+        }
+      }
     }
 
     _, _, _, True -> {
@@ -465,6 +481,7 @@ fn parse_struct_decl(
 fn parse_enum_decl(
   header_line: String,
   public_all: Bool,
+  is_suberror: Bool,
   variant_lines: List(String),
   is_deprecated: Bool,
 ) -> Result(MbtiTypeDecl, String) {
@@ -485,7 +502,11 @@ fn parse_enum_decl(
   Ok(MbtiTypeDecl(
     name:,
     type_params:,
-    kind: MbtiEnum(public_all:, variants: list.reverse(rev_variants)),
+    kind: MbtiEnum(
+      public_all:,
+      is_suberror:,
+      variants: list.reverse(rev_variants),
+    ),
     is_deprecated:,
   ))
 }
@@ -554,7 +575,8 @@ fn parse_fn_decl(
   })
 
   use #(return_type, tail_eff) <- result.try(parse_type(ret_and_eff))
-  let #(raises, poly_raise) = parse_raise_suffix(string.trim(tail_eff))
+  let #(raises, poly_raise, raise_type) =
+    parse_raise_suffix(string.trim(tail_eff))
 
   Ok(MbtiFnDecl(
     type_params:,
@@ -563,6 +585,7 @@ fn parse_fn_decl(
     params:,
     return_type:,
     raises:,
+    raise_type:,
     poly_raise:,
     is_async:,
     is_deprecated:,
@@ -743,16 +766,26 @@ fn parse_comma_types(src: String) -> Result(List(MbtiType), String) {
   }
 }
 
-fn parse_raise_suffix(suffix: String) -> #(Bool, Bool) {
+fn parse_raise_suffix(suffix: String) -> #(Bool, Bool, Option(MbtiType)) {
   let s = string.trim(suffix)
   case
     string.starts_with(s, "raise?"),
     string.starts_with(s, "raise"),
     string.starts_with(s, "noraise")
   {
-    True, _, _ -> #(False, True)
-    False, True, _ -> #(True, False)
-    _, _, _ -> #(False, False)
+    True, _, _ -> #(False, True, None)
+    False, True, _ -> {
+      let after_kw = string.trim_start(string.drop_start(s, 5))
+      case after_kw {
+        "" -> #(True, False, None)
+        _ ->
+          case parse_type(after_kw) {
+            Ok(#(ty, _)) -> #(True, False, Some(ty))
+            Error(_) -> #(True, False, None)
+          }
+      }
+    }
+    _, _, _ -> #(False, False, None)
   }
 }
 

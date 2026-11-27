@@ -2,13 +2,14 @@ import argv
 import emit/pkg_config
 import emit/wit_bridge
 import filepath
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import moonbit/bindgen
+import moonbit/bindgen_adapter.{type BindOptions, BindOptions}
 import project/cmd
 import project/diagnostics
 import project/fs
@@ -78,6 +79,10 @@ pub type CliAction {
     package: String,
     module: Option(String),
     out: Option(String),
+    only: List(String),
+    map_types: Dict(String, #(String, String)),
+    typed_errors: Bool,
+    adapter: Option(String),
   )
   ShimNewAction(
     root: String,
@@ -101,6 +106,10 @@ type BindFlags {
     package: Option(String),
     module: Option(String),
     out: Option(String),
+    only: List(String),
+    map_types: Dict(String, #(String, String)),
+    typed_errors: Bool,
+    adapter: Option(String),
   )
 }
 
@@ -163,9 +172,24 @@ pub fn main() -> Nil {
       require_tools_or_halt(["gleam", "moon", "wit-bindgen", "wasm-tools"])
       run_wit_build(root, wit_dir, world, out, output, release)
     }
-    Ok(MoonbitBindAction(root:, package:, module:, out:)) -> {
+    Ok(MoonbitBindAction(
+      root:,
+      package:,
+      module:,
+      out:,
+      only:,
+      map_types:,
+      typed_errors:,
+      adapter:,
+    )) -> {
       require_tools_or_halt(["moon"])
-      run_moonbit_bind(root, package, module, out)
+      run_moonbit_bind(
+        root,
+        package,
+        module,
+        out,
+        BindOptions(only:, map_types:, typed_errors:, adapter_name: adapter),
+      )
     }
     Ok(ShimNewAction(root:, package:, out:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
@@ -1105,9 +1129,12 @@ fn run_moonbit_bind(
   package: String,
   module: Option(String),
   out: Option(String),
+  options: BindOptions,
 ) -> Nil {
   let out_dir = option.unwrap(out, filepath.join(root, "build/moonbit"))
-  case bindgen.bind_package(root, package, module, out_dir) {
+  case
+    bindgen.bind_package_with_options(root, package, module, out_dir, options)
+  {
     Error(err) -> {
       io.println_error("gekko moonbit bind error: " <> err)
       halt(1)
@@ -1320,7 +1347,16 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
         ["moonbit", "bind", ..rest] -> {
           use f <- result.try(parse_bind_flags(
             rest,
-            BindFlags(root: ".", package: None, module: None, out: None),
+            BindFlags(
+              root: ".",
+              package: None,
+              module: None,
+              out: None,
+              only: [],
+              map_types: dict.new(),
+              typed_errors: False,
+              adapter: None,
+            ),
           ))
           case f.package {
             Some(pkg) ->
@@ -1329,6 +1365,10 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
                 package: pkg,
                 module: f.module,
                 out: f.out,
+                only: list.reverse(f.only),
+                map_types: f.map_types,
+                typed_errors: f.typed_errors,
+                adapter: f.adapter,
               ))
             None -> Error("Expected `<pkg>` after `gekko moonbit bind`")
           }
@@ -1461,10 +1501,32 @@ fn parse_bind_flags(
       parse_bind_flags(rest, BindFlags(..acc, module: Some(val)))
     ["--out", val, ..rest] | ["--work-dir", val, ..rest] ->
       parse_bind_flags(rest, BindFlags(..acc, out: Some(val)))
-    [val, ..rest] ->
-      case acc.package {
-        None -> parse_bind_flags(rest, BindFlags(..acc, package: Some(val)))
-        Some(_) -> Error("Unknown or unexpected argument: " <> val)
+    ["--adapter", val, ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, adapter: Some(val)))
+    ["--only", val, ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, only: [val, ..acc.only]))
+    ["--map-type", val, ..rest] -> {
+      use #(mbt_ty, target) <- result.try(bindgen.parse_map_type_arg(val))
+      parse_bind_flags(
+        rest,
+        BindFlags(..acc, map_types: dict.insert(acc.map_types, mbt_ty, target)),
+      )
+    }
+    ["--typed-errors", ..rest] ->
+      parse_bind_flags(rest, BindFlags(..acc, typed_errors: True))
+    [flag, ..] ->
+      case string.starts_with(flag, "-") {
+        True -> Error("Unknown or incomplete flag: " <> flag)
+        False ->
+          case args {
+            [val, ..rest] ->
+              case acc.package {
+                None ->
+                  parse_bind_flags(rest, BindFlags(..acc, package: Some(val)))
+                Some(_) -> Error("Unknown or unexpected argument: " <> val)
+              }
+            [] -> Ok(acc)
+          }
       }
   }
 }
@@ -1703,7 +1765,7 @@ fn print_usage() -> Nil {
     "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",
     "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
     "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",
-    "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--work-dir <dir>]",
+    "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--adapter <pkg>] [--only <item> ...] [--map-type <Mbt=Gleam> ...] [--typed-errors] [--work-dir <dir>]",
     "  gekko shim new     <pkg> [--root <dir>] [--out <dir> | -o <dir>] [--moonbit]",
     "  gekko shim init    [--root <dir>] [--moonbit]",
     "  gekko shim inspect [<pkg>] [--root <dir>]",

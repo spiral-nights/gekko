@@ -107,6 +107,16 @@ pub fn base_metadata() -> FfiMetadata {
       |> dict.insert(#("builtin", name), builtin_value_traits)
       |> dict.insert(#("", name), builtin_value_traits)
     })
+    |> dict.insert(
+      #("moonbitlang/core/immut/hashmap", "HashMap"),
+      ExternalTypeTraits(
+        has_eq: True,
+        has_debug: True,
+        has_hash: True,
+        has_inspect: True,
+        eq_requires_hash_params: set.new(),
+      ),
+    )
   let seeded = FfiMetadata(types: initial_types, functions: dict.new())
   scan_mbt_source(seeded, "gprelude", prelude_runtime.gprelude_mbt())
 }

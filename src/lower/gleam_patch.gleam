@@ -8,18 +8,18 @@ import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table.{type SymbolTable}
 import lower/ir.{
-  type IrBitSize, type IrConstant, type IrExpr, type IrFunction, type IrModule,
-  type IrPattern, type IrStmt, type IrType, type IrTypeAlias, IrAbort, IrBinOp,
-  IrBitSizeBinOp, IrBitSizeInt, IrBitSizeVar, IrBitString, IrBlock, IrBool,
-  IrBreak, IrCall, IrCallArg, IrClause, IrConstant, IrConstructor, IrContinue,
-  IrEcho, IrFloat, IrFn, IrForLoop, IrFunction, IrGetterCall, IrInt, IrList,
-  IrMatch, IrModule, IrModuleRef, IrNegateBool, IrNegateInt, IrParam, IrPatArg,
-  IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt,
-  IrPatString, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrStmtAssert,
-  IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrTuple, IrTupleIndex,
-  IrTypeBitArray, IrTypeBool, IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList,
-  IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar,
-  IrUnit, IrVar,
+  type IrBitSize, type IrConstant, type IrExpr, type IrFunction, type IrGetter,
+  type IrModule, type IrPattern, type IrStmt, type IrType, type IrTypeAlias,
+  type IrTypeDef, IrAbort, IrBinOp, IrBitSizeBinOp, IrBitSizeInt, IrBitSizeVar,
+  IrBitString, IrBlock, IrBool, IrBreak, IrCall, IrCallArg, IrClause, IrConstant,
+  IrConstructor, IrContinue, IrEcho, IrFloat, IrFn, IrForLoop, IrFunction,
+  IrGetterCall, IrInt, IrList, IrMatch, IrModule, IrModuleRef, IrNegateBool,
+  IrNegateInt, IrParam, IrPatArg, IrPatAs, IrPatBitString, IrPatBool,
+  IrPatDiscard, IrPatFloat, IrPatInt, IrPatString, IrPatTuple, IrPatUnit,
+  IrPatVar, IrPatVariant, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet,
+  IrString, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble,
+  IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString,
+  IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
 }
 import lower/ir_util
 import lower/mangle
@@ -274,14 +274,14 @@ fn splice_target_module(
         dedup_constants(list.append(target_mod.constants, extra_consts))
       let deduped_fns =
         dedup_functions(list.append(list.reverse(rev_fns), extra_fns))
-      Ok(#(
+      let updated_mod =
         IrModule(
           ..target_mod,
           constants: deduped_consts,
           functions: deduped_fns,
-        ),
-        next_tracker,
-      ))
+        )
+        |> prune_unused_private_types
+      Ok(#(updated_mod, next_tracker))
     }
   }
 }
@@ -2833,5 +2833,411 @@ fn prune_source_module(
         })
       IrModule(..mod, functions: kept_fns, constants: kept_consts)
     }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Prune unreachable private types in patched target modules
+// -----------------------------------------------------------------------------
+
+fn prune_unused_private_types(mod: IrModule) -> IrModule {
+  let private_types =
+    list.filter(mod.types, fn(td) { td.publicity == glance.Private })
+  case private_types {
+    [] -> mod
+    _ -> {
+      let private_by_name =
+        list.fold(private_types, dict.new(), fn(acc, td) {
+          dict.insert(acc, td.name, td)
+        })
+      let ctor_to_type =
+        list.fold(private_types, dict.new(), fn(acc, td) {
+          list.fold(td.variants, acc, fn(inner_acc, variant) {
+            dict.insert(inner_acc, variant.name, td.name)
+          })
+        })
+
+      let root_refs = set.new()
+      let root_refs =
+        list.fold(mod.types, root_refs, fn(acc, td) {
+          case td.publicity == glance.Private {
+            True -> acc
+            False -> collect_type_def_refs(td, mod.module_name, acc)
+          }
+        })
+      let root_refs =
+        list.fold(mod.type_aliases, root_refs, fn(acc, ta) {
+          collect_type_refs(ta.aliased, mod.module_name, acc)
+        })
+      let root_refs =
+        list.fold(mod.getters, root_refs, fn(acc, g: IrGetter) {
+          case dict.has_key(private_by_name, g.type_name) {
+            True -> acc
+            False -> collect_type_refs(g.return_type, mod.module_name, acc)
+          }
+        })
+      let root_refs =
+        list.fold(mod.constants, root_refs, fn(acc, c) {
+          let acc = collect_type_refs(c.value_type, mod.module_name, acc)
+          collect_expr_type_refs(c.value, mod.module_name, ctor_to_type, acc)
+        })
+      let root_refs =
+        list.fold(mod.functions, root_refs, fn(acc, f) {
+          collect_fn_type_refs(f, mod.module_name, ctor_to_type, acc)
+        })
+
+      let initial_private =
+        list.filter(set.to_list(root_refs), dict.has_key(private_by_name, _))
+      let reachable_private =
+        drain_private_type_worklist(
+          initial_private,
+          set.from_list(initial_private),
+          mod.module_name,
+          private_by_name,
+          mod.getters,
+        )
+
+      let kept_types =
+        list.filter(mod.types, fn(td) {
+          td.publicity != glance.Private
+          || set.contains(reachable_private, td.name)
+        })
+      let kept_getters =
+        list.filter(mod.getters, fn(g: IrGetter) {
+          !dict.has_key(private_by_name, g.type_name)
+          || set.contains(reachable_private, g.type_name)
+        })
+      IrModule(..mod, types: kept_types, getters: kept_getters)
+    }
+  }
+}
+
+fn drain_private_type_worklist(
+  queue: List(String),
+  visited: Set(String),
+  mod_name: String,
+  private_by_name: Dict(String, IrTypeDef),
+  getters: List(IrGetter),
+) -> Set(String) {
+  case queue {
+    [] -> visited
+    [name, ..rest] -> {
+      let refs = case dict.get(private_by_name, name) {
+        Ok(td) -> collect_type_def_refs(td, mod_name, set.new())
+        Error(_) -> set.new()
+      }
+      let refs =
+        list.fold(getters, refs, fn(acc, g: IrGetter) {
+          case g.type_name == name {
+            True -> collect_type_refs(g.return_type, mod_name, acc)
+            False -> acc
+          }
+        })
+      let #(next_queue, next_visited) =
+        set.fold(refs, #(rest, visited), fn(acc, ref_name) {
+          let #(q, vis) = acc
+          case
+            dict.has_key(private_by_name, ref_name)
+            && !set.contains(vis, ref_name)
+          {
+            True -> #([ref_name, ..q], set.insert(vis, ref_name))
+            False -> acc
+          }
+        })
+      drain_private_type_worklist(
+        next_queue,
+        next_visited,
+        mod_name,
+        private_by_name,
+        getters,
+      )
+    }
+  }
+}
+
+fn collect_type_def_refs(
+  td: IrTypeDef,
+  mod_name: String,
+  acc: Set(String),
+) -> Set(String) {
+  list.fold(td.variants, acc, fn(v_acc, v) {
+    list.fold(v.fields, v_acc, fn(f_acc, f) {
+      collect_type_refs(f.field_type, mod_name, f_acc)
+    })
+  })
+}
+
+fn collect_type_refs(
+  ty: IrType,
+  mod_name: String,
+  acc: Set(String),
+) -> Set(String) {
+  case ty {
+    IrTypeList(inner) -> collect_type_refs(inner, mod_name, acc)
+    IrTypeResult(ok:, err:) ->
+      collect_type_refs(ok, mod_name, acc)
+      |> fn(next) { collect_type_refs(err, mod_name, next) }
+    IrTypeTuple(els) ->
+      list.fold(els, acc, fn(el_acc, el) {
+        collect_type_refs(el, mod_name, el_acc)
+      })
+    IrTypeFn(params:, return:) -> {
+      let after_params =
+        list.fold(params, acc, fn(p_acc, p) {
+          collect_type_refs(p, mod_name, p_acc)
+        })
+      collect_type_refs(return, mod_name, after_params)
+    }
+    IrTypeNamed(module:, name:, args:, ..) -> {
+      let acc = case module == "" || module == mod_name {
+        True -> set.insert(acc, name)
+        False -> acc
+      }
+      list.fold(args, acc, fn(a_acc, a) {
+        collect_type_refs(a, mod_name, a_acc)
+      })
+    }
+    IrTypeInt64
+    | IrTypeDouble
+    | IrTypeString
+    | IrTypeBool
+    | IrTypeUnit
+    | IrTypeBitArray
+    | IrTypeVar(_) -> acc
+  }
+}
+
+fn collect_fn_type_refs(
+  f: IrFunction,
+  mod_name: String,
+  ctor_to_type: Dict(String, String),
+  acc: Set(String),
+) -> Set(String) {
+  let acc =
+    list.fold(f.params, acc, fn(p_acc, p) {
+      collect_type_refs(p.param_type, mod_name, p_acc)
+    })
+  let acc = collect_type_refs(f.return_type, mod_name, acc)
+  collect_stmts_type_refs(f.body, mod_name, ctor_to_type, acc)
+}
+
+fn collect_stmts_type_refs(
+  stmts: List(IrStmt),
+  mod_name: String,
+  ctor_to_type: Dict(String, String),
+  acc: Set(String),
+) -> Set(String) {
+  list.fold(stmts, acc, fn(s_acc, stmt) {
+    case stmt {
+      IrStmtLet(pattern:, annotation:, value:) -> {
+        let s_acc =
+          collect_pattern_type_refs(pattern, mod_name, ctor_to_type, s_acc)
+        let s_acc = case annotation {
+          Some(ty) -> collect_type_refs(ty, mod_name, s_acc)
+          None -> s_acc
+        }
+        collect_expr_type_refs(value, mod_name, ctor_to_type, s_acc)
+      }
+      IrStmtGuard(
+        value:,
+        pattern:,
+        guard_condition:,
+        abort_message:,
+        post_bindings:,
+      ) -> {
+        let s_acc = collect_expr_type_refs(value, mod_name, ctor_to_type, s_acc)
+        let s_acc =
+          collect_pattern_type_refs(pattern, mod_name, ctor_to_type, s_acc)
+        let s_acc = case guard_condition {
+          Some(g) -> collect_expr_type_refs(g, mod_name, ctor_to_type, s_acc)
+          None -> s_acc
+        }
+        let s_acc = case abort_message {
+          Some(m) -> collect_expr_type_refs(m, mod_name, ctor_to_type, s_acc)
+          None -> s_acc
+        }
+        list.fold(post_bindings, s_acc, fn(b_acc, b) {
+          collect_expr_type_refs(b.1, mod_name, ctor_to_type, b_acc)
+        })
+      }
+      IrStmtAssert(condition:, abort_message:) -> {
+        let s_acc =
+          collect_expr_type_refs(condition, mod_name, ctor_to_type, s_acc)
+        case abort_message {
+          Some(m) -> collect_expr_type_refs(m, mod_name, ctor_to_type, s_acc)
+          None -> s_acc
+        }
+      }
+      IrStmtExpr(expr) ->
+        collect_expr_type_refs(expr, mod_name, ctor_to_type, s_acc)
+    }
+  })
+}
+
+fn collect_expr_type_refs(
+  expr: IrExpr,
+  mod_name: String,
+  ctor_to_type: Dict(String, String),
+  acc: Set(String),
+) -> Set(String) {
+  case expr {
+    IrInt(_) | IrFloat(_) | IrString(_) | IrBool(_) | IrUnit -> acc
+    IrVar(name) -> record_ctor_type_ref(name, ctor_to_type, acc)
+    IrModuleRef(target_module:, symbol:, ..) ->
+      case target_module == mod_name {
+        True -> record_ctor_type_ref(symbol, ctor_to_type, acc)
+        False -> acc
+      }
+    IrConstructor(target_module:, name:, ..) ->
+      case target_module == None || target_module == Some(mod_name) {
+        True -> record_ctor_type_ref(name, ctor_to_type, acc)
+        False -> acc
+      }
+    IrTuple(els) | IrContinue(els) ->
+      list.fold(els, acc, fn(e_acc, e) {
+        collect_expr_type_refs(e, mod_name, ctor_to_type, e_acc)
+      })
+    IrTupleIndex(tuple:, ..) | IrNegateInt(tuple) | IrNegateBool(tuple) ->
+      collect_expr_type_refs(tuple, mod_name, ctor_to_type, acc)
+    IrList(elements:, tail:) -> {
+      let acc =
+        list.fold(elements, acc, fn(e_acc, e) {
+          collect_expr_type_refs(e, mod_name, ctor_to_type, e_acc)
+        })
+      case tail {
+        Some(t) -> collect_expr_type_refs(t, mod_name, ctor_to_type, acc)
+        None -> acc
+      }
+    }
+    IrBitString(segments:) ->
+      list.fold(segments, acc, fn(seg_acc, seg) {
+        let seg_acc =
+          collect_expr_type_refs(seg.0, mod_name, ctor_to_type, seg_acc)
+        list.fold(seg.1, seg_acc, fn(opt_acc, opt) {
+          case opt {
+            glance.SizeValueOption(v) ->
+              collect_expr_type_refs(v, mod_name, ctor_to_type, opt_acc)
+            _ -> opt_acc
+          }
+        })
+      })
+    IrBinOp(left:, right:, ..) -> {
+      let acc = collect_expr_type_refs(left, mod_name, ctor_to_type, acc)
+      collect_expr_type_refs(right, mod_name, ctor_to_type, acc)
+    }
+    IrCall(function:, args:) -> {
+      let acc = collect_expr_type_refs(function, mod_name, ctor_to_type, acc)
+      list.fold(args, acc, fn(a_acc, a) {
+        collect_expr_type_refs(a.value, mod_name, ctor_to_type, a_acc)
+      })
+    }
+    IrGetterCall(receiver:, ..) ->
+      collect_expr_type_refs(receiver, mod_name, ctor_to_type, acc)
+    IrBlock(stmts) ->
+      collect_stmts_type_refs(stmts, mod_name, ctor_to_type, acc)
+    IrFn(params:, return_type:, body:) -> {
+      let acc =
+        list.fold(params, acc, fn(p_acc, p) {
+          case p.param_type {
+            Some(ty) -> collect_type_refs(ty, mod_name, p_acc)
+            None -> p_acc
+          }
+        })
+      let acc = case return_type {
+        Some(ty) -> collect_type_refs(ty, mod_name, acc)
+        None -> acc
+      }
+      collect_stmts_type_refs(body, mod_name, ctor_to_type, acc)
+    }
+    IrMatch(subjects:, clauses:) -> {
+      let acc =
+        list.fold(subjects, acc, fn(s_acc, s) {
+          collect_expr_type_refs(s, mod_name, ctor_to_type, s_acc)
+        })
+      list.fold(clauses, acc, fn(c_acc, c) {
+        let c_acc =
+          list.fold(c.patterns, c_acc, fn(ps_acc, ps) {
+            list.fold(ps, ps_acc, fn(p_acc, p) {
+              collect_pattern_type_refs(p, mod_name, ctor_to_type, p_acc)
+            })
+          })
+        let c_acc = case c.guard {
+          Some(g) -> collect_expr_type_refs(g, mod_name, ctor_to_type, c_acc)
+          None -> c_acc
+        }
+        let c_acc =
+          list.fold(c.prefix_bindings, c_acc, fn(b_acc, b) {
+            collect_expr_type_refs(b.1, mod_name, ctor_to_type, b_acc)
+          })
+        collect_expr_type_refs(c.body, mod_name, ctor_to_type, c_acc)
+      })
+    }
+    IrForLoop(bindings:, body:) -> {
+      let acc =
+        list.fold(bindings, acc, fn(b_acc, b) {
+          collect_expr_type_refs(b.1, mod_name, ctor_to_type, b_acc)
+        })
+      collect_stmts_type_refs(body, mod_name, ctor_to_type, acc)
+    }
+    IrBreak(e) -> collect_expr_type_refs(e, mod_name, ctor_to_type, acc)
+    IrAbort(message:, ..) ->
+      case message {
+        Some(m) -> collect_expr_type_refs(m, mod_name, ctor_to_type, acc)
+        None -> acc
+      }
+    IrEcho(expr:, message:, ..) -> {
+      let acc = collect_expr_type_refs(expr, mod_name, ctor_to_type, acc)
+      case message {
+        Some(m) -> collect_expr_type_refs(m, mod_name, ctor_to_type, acc)
+        None -> acc
+      }
+    }
+  }
+}
+
+fn collect_pattern_type_refs(
+  pat: IrPattern,
+  mod_name: String,
+  ctor_to_type: Dict(String, String),
+  acc: Set(String),
+) -> Set(String) {
+  case pat {
+    IrPatInt(_)
+    | IrPatFloat(_)
+    | IrPatString(_)
+    | IrPatBool(_)
+    | IrPatUnit
+    | IrPatDiscard
+    | IrPatVar(_) -> acc
+    IrPatAs(pattern:, ..) ->
+      collect_pattern_type_refs(pattern, mod_name, ctor_to_type, acc)
+    IrPatTuple(els) ->
+      list.fold(els, acc, fn(p_acc, p) {
+        collect_pattern_type_refs(p, mod_name, ctor_to_type, p_acc)
+      })
+    IrPatVariant(target_module:, constructor:, args:, ..) -> {
+      let acc = case target_module == None || target_module == Some(mod_name) {
+        True -> record_ctor_type_ref(constructor, ctor_to_type, acc)
+        False -> acc
+      }
+      list.fold(args, acc, fn(a_acc, a) {
+        collect_pattern_type_refs(a.pattern, mod_name, ctor_to_type, a_acc)
+      })
+    }
+    IrPatBitString(segments:) ->
+      list.fold(segments, acc, fn(seg_acc, seg) {
+        collect_pattern_type_refs(seg.0, mod_name, ctor_to_type, seg_acc)
+      })
+  }
+}
+
+fn record_ctor_type_ref(
+  name: String,
+  ctor_to_type: Dict(String, String),
+  acc: Set(String),
+) -> Set(String) {
+  case dict.get(ctor_to_type, name) {
+    Ok(type_name) -> set.insert(acc, type_name)
+    Error(_) -> acc
   }
 }

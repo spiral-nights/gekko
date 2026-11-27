@@ -33,6 +33,7 @@ pub type FnTraitBounds {
     eq_vars: Set(String),
     to_dynamic_vars: Set(String),
     inspect_vars: Set(String),
+    show_vars: Set(String),
   )
 }
 
@@ -52,6 +53,7 @@ pub fn empty_fn_bounds() -> FnTraitBounds {
     eq_vars: set.new(),
     to_dynamic_vars: set.new(),
     inspect_vars: set.new(),
+    show_vars: set.new(),
   )
 }
 
@@ -419,7 +421,16 @@ fn extract_ffi_bounds(
         True -> set.union(acc.inspect_vars, inspectable_vars)
         False -> acc.inspect_vars
       }
-      FnTraitBounds(eq_vars: eq_v, to_dynamic_vars: dyn_v, inspect_vars: insp_v)
+      let show_v = case set.contains(traits, "Show") {
+        True -> set.union(acc.show_vars, raw_vars)
+        False -> acc.show_vars
+      }
+      FnTraitBounds(
+        eq_vars: eq_v,
+        to_dynamic_vars: dyn_v,
+        inspect_vars: insp_v,
+        show_vars: show_v,
+      )
     })
   clamp_bounds(raw, allowed)
 }
@@ -531,6 +542,7 @@ fn bounds_grew(old: FnTraitBounds, new: FnTraitBounds) -> Bool {
   set.size(new.eq_vars) > set.size(old.eq_vars)
   || set.size(new.to_dynamic_vars) > set.size(old.to_dynamic_vars)
   || set.size(new.inspect_vars) > set.size(old.inspect_vars)
+  || set.size(new.show_vars) > set.size(old.show_vars)
 }
 
 fn clamp_bounds(b: FnTraitBounds, allowed: Set(String)) -> FnTraitBounds {
@@ -538,6 +550,7 @@ fn clamp_bounds(b: FnTraitBounds, allowed: Set(String)) -> FnTraitBounds {
     eq_vars: set.intersection(b.eq_vars, allowed),
     to_dynamic_vars: set.intersection(b.to_dynamic_vars, allowed),
     inspect_vars: set.intersection(b.inspect_vars, allowed),
+    show_vars: set.intersection(b.show_vars, allowed),
   )
 }
 
@@ -1576,10 +1589,18 @@ fn apply_callee_bounds_via_subst(
         Error(_) -> s
       }
     })
+  let next_show =
+    set.fold(callee_bounds.show_vars, acc.show_vars, fn(s, tp) {
+      case dict.get(subst, tp) {
+        Ok(caller_ty) -> collect_type_var_names(caller_ty, s)
+        Error(_) -> s
+      }
+    })
   FnTraitBounds(
     eq_vars: next_eq,
     to_dynamic_vars: next_dyn,
     inspect_vars: next_insp,
+    show_vars: next_show,
   )
 }
 

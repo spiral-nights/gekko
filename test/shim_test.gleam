@@ -1472,6 +1472,74 @@ pub fn eq_wrap_test() {
   Nil
 }
 
+pub fn gleam_patch_prunes_unreferenced_private_types_test() {
+  let base = "build/test_fixtures/gleam_patch_prune_priv"
+  let up_dir = filepath.join(base, "upstream")
+  let app_dir = filepath.join(base, "my_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src/shims"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/m.gleam"),
+      contents: "type UnusedPriv(k, v) { UnusedPriv(k) }
+
+fn make_priv(x: a) -> UnusedPriv(a, b) {
+  UnusedPriv(x)
+}
+
+pub fn compute(x: Int) -> Int {
+  let _ = make_priv(x)
+  x
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"my_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/shims/m_shim.gleam"),
+      contents: "/// @patch(\"upstream:up/m.compute\")
+pub fn compute_shim(x: Int) -> Int {
+  x + 1
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/my_app.gleam"),
+      contents: "import up/m
+pub fn main() -> Int {
+  m.compute(1)
+}
+",
+    )
+    == Ok(Nil)
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Ok(_) = workspace.transpile_project(app_dir, out_dir)
+  let assert Ok(mbt) =
+    simplifile.read(from: filepath.join(out_dir, "up/m/m.mbt"))
+  assert !string.contains(mbt, "UnusedPriv")
+  let chk =
+    cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
+  assert chk.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
 fn is_error(res: Result(a, b)) -> Bool {
   case res {
     Ok(_) -> False

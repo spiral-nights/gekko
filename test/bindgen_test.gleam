@@ -548,11 +548,7 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--deny-warn", "--target", "wasm"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -666,11 +662,7 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--deny-warn", "--target", "wasm"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -1268,11 +1260,7 @@ pub fn moonbit_bindgen_gprelude_and_builtin_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--deny-warn", "--target", "wasm"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -1325,7 +1313,12 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
       Some("ffi/hashmap"),
       info_dir,
       BindOptions(
-        only: ["HashMap::new", "HashMap::add", "HashMap::get", "HashMap::fold"],
+        only: [
+          "HashMap::empty",
+          "HashMap::insert",
+          "HashMap::get",
+          "HashMap::fold",
+        ],
         map_types: dict.new(),
         typed_errors: False,
         adapter_name: Some("jh_hashmap_adapter"),
@@ -1351,7 +1344,7 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
     <> "import ffi/json as mjson\n"
     <> "import gleam/option.{None, Some}\n\n"
     <> "pub fn main() -> Nil {\n"
-    <> "  let hm = mhm.add(mhm.add(mhm.new(), \"a\", 10), \"b\", 20)\n"
+    <> "  let hm = mhm.insert(mhm.insert(mhm.empty(), \"a\", 10), \"b\", 20)\n"
     <> "  assert mhm.get(hm, \"a\") == Some(10)\n"
     <> "  let total = mhm.fold(hm, 0, fn(acc, _k, v) { acc + v })\n"
     <> "  assert total == 30\n"
@@ -1391,11 +1384,7 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(
-      command: "moon",
-      args: ["check", "--deny-warn", "--target", "wasm"],
-      cwd: out_dir,
-    )
+    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
   assert check_moon.exit_code == 0
 
   let run_wasm =

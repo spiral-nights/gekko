@@ -1045,11 +1045,11 @@ pub fn toolchain_version_parallel_and_diagnostics_test() {
   assert cmd.is_version_at_least(#(0, 1, 20_261_119), cmd.min_moon_version)
   assert !cmd.is_version_at_least(#(0, 1, 20_261_001), cmd.min_moon_version)
   assert cmd.is_version_at_least(cmd.pinned_moon_version, cmd.min_moon_version)
-  assert cmd.is_version_newer(#(0, 1, 20_261_120), cmd.pinned_moon_version)
+  assert cmd.is_version_newer(#(0, 1, 20_261_127), cmd.pinned_moon_version)
   assert !cmd.is_version_newer(cmd.pinned_moon_version, cmd.pinned_moon_version)
   assert !cmd.is_version_newer(#(0, 1, 20_261_118), cmd.pinned_moon_version)
-  assert cmd.version_to_string(cmd.pinned_moon_version) == "0.1.20261119"
-  assert cmd.version_to_string(cmd.pinned_moonc_version) == "0.10.22"
+  assert cmd.version_to_string(cmd.pinned_moon_version) == "0.1.20261126"
+  assert cmd.version_to_string(cmd.pinned_moonc_version) == "1.0.0"
 
   // Parallel map preserves order and surfaces first error
   assert cmd.parallel_try_map([1, 2, 3, 4], fn(n) { Ok(n * 10) })

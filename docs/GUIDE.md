@@ -376,7 +376,7 @@ Use `gekko wit` when you want a **WASI Preview 2 / Component Model** `.wasm` com
 | `List(a)` | `@gprelude.GList[A]` | `Nil` \| `Cons(A, GList[A])`; `xs.to_array()`, `GList::from_array(arr[:])`. |
 | `BitArray` | `@gprelude.BitArray` | `BitArray::empty()`, `from_bytes(b)`, `from_string(s)`, `concat(parts[:])`. |
 | `Result(a, b)` | `Result[A, B]` | `Ok(a)` \| `Err(b)`. |
-| `Option(a)` | `Option[A]` | `Some(a)` \| `None` (via `gekko_stdlib`). |
+| `Option(a)` | `Option[A]` | `Some(a)` \| `None` (built-in default for `gleam_stdlib`). |
 | `Dynamic` | `@gprelude.Dynamic` | `DynNull`, `DynBool`, `DynInt`, `DynFloat`, `DynString`, `DynBitArray`, `DynList`, `DynArray`, `DynMap`, `ToDynamic::to_dynamic`. |
 | `#()`, `#(a)` | `@gprelude.Tuple0`, `@gprelude.Tuple1[A]` | Boxed 0-tuple and 1-tuple wrappers. |
 | `#(a, b, ...)` | `(A, B, ...)` | Native MoonBit tuples (2+ elements). |

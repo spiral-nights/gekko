@@ -4,14 +4,15 @@ import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import index/symbol_table
 import project/cmd
 import project/diagnostics
 import project/ffi_config
 import project/loader
 import project/patch_discovery
 import project/prepass.{
-  ExternalType, GleamPatch, GleamPatchEntry, PackageCall, PreferErlang,
-  PreferJavascript, WasmImport,
+  DocPragma, ExternalType, ExternalTypeEntry, GleamPatch, GleamPatchEntry,
+  PackageCall, PreferErlang, PreferJavascript, PrepassResult, WasmImport,
 }
 import project/shim_cli
 import project/workspace
@@ -2127,6 +2128,80 @@ pub fn leak() -> Int {
 
   let _ = simplifile.delete(file_or_dir_at: base)
   Nil
+}
+
+pub fn builtin_default_type_overrides_test() {
+  let empty_prepass =
+    PrepassResult(
+      cleaned_source: "",
+      ffi_entries: [],
+      external_types: [],
+      gleam_patches: [],
+      gleam_type_patches: [],
+      patch_mirror: None,
+    )
+
+  assert symbol_table.resolve_type_override(
+      "gleam_stdlib",
+      "gleam/option",
+      "Option",
+      empty_prepass,
+      dict.new(),
+    )
+    == Some(ExternalType(package: "builtin", type_name: "Option"))
+
+  assert symbol_table.resolve_type_override(
+      "gleam_stdlib",
+      "gleam/dynamic",
+      "Dynamic",
+      empty_prepass,
+      dict.new(),
+    )
+    == Some(ExternalType(package: "gprelude", type_name: "Dynamic"))
+
+  assert symbol_table.resolve_type_override(
+      "other_pkg",
+      "gleam/option",
+      "Option",
+      empty_prepass,
+      dict.new(),
+    )
+    == None
+
+  let pragma_prepass =
+    PrepassResult(..empty_prepass, external_types: [
+      ExternalTypeEntry(
+        module: "gleam/dynamic",
+        gleam_type_name: "Dynamic",
+        target: ExternalType(package: "custom_pkg", type_name: "CustomDyn"),
+        source: DocPragma,
+        line: 1,
+      ),
+    ])
+  assert symbol_table.resolve_type_override(
+      "gleam_stdlib",
+      "gleam/dynamic",
+      "Dynamic",
+      pragma_prepass,
+      dict.new(),
+    )
+    == Some(ExternalType(package: "custom_pkg", type_name: "CustomDyn"))
+
+  let explicit_overrides =
+    dict.from_list([
+      #(
+        "gleam_stdlib:gleam/option.Option",
+        ExternalType(package: "custom_pkg", type_name: "CustomOpt"),
+      ),
+    ])
+  assert symbol_table.resolve_type_override(
+      "gleam_stdlib",
+      "gleam/option",
+      "Option",
+      empty_prepass,
+      explicit_overrides,
+    )
+    == Some(ExternalType(package: "custom_pkg", type_name: "CustomOpt"))
 }
 
 fn is_error(res: Result(a, b)) -> Bool {

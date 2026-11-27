@@ -13,7 +13,7 @@ import project/interface.{
 }
 import project/prepass.{
   type ExternalType, type FfiKind, type PrepassResult, type TargetBranch,
-  PreferErlang, PreferJavascript,
+  ExternalType, PreferErlang, PreferJavascript,
 }
 
 /// Global symbol index for a Gleam package (and its staged/parsed modules).
@@ -600,7 +600,8 @@ fn resolve_import_alias(
   }
 }
 
-/// Resolve any MoonBit `@external_type` mapping from `type_overrides` or source pragmas.
+/// Resolve any MoonBit `@external_type` mapping from `type_overrides`, source
+/// pragmas, or built-in `gleam_stdlib` defaults.
 pub fn resolve_type_override(
   package_name: String,
   mod_name: String,
@@ -616,11 +617,29 @@ pub fn resolve_type_override(
   case list.find_map(candidate_keys, fn(k) { dict.get(type_overrides, k) }) {
     Ok(ext) -> Some(ext)
     Error(_) ->
-      list.find(prepass_res.external_types, fn(entry) {
-        entry.gleam_type_name == type_name
-      })
-      |> option.from_result
-      |> option.map(fn(entry) { entry.target })
+      case
+        list.find(prepass_res.external_types, fn(entry) {
+          entry.gleam_type_name == type_name
+        })
+      {
+        Ok(entry) -> Some(entry.target)
+        Error(_) ->
+          builtin_default_type_override(package_name, mod_name, type_name)
+      }
+  }
+}
+
+fn builtin_default_type_override(
+  package_name: String,
+  mod_name: String,
+  type_name: String,
+) -> Option(ExternalType) {
+  case package_name, mod_name, type_name {
+    "gleam_stdlib", "gleam/option", "Option" ->
+      Some(ExternalType(package: "builtin", type_name: "Option"))
+    "gleam_stdlib", "gleam/dynamic", "Dynamic" ->
+      Some(ExternalType(package: "gprelude", type_name: "Dynamic"))
+    _, _, _ -> None
   }
 }
 

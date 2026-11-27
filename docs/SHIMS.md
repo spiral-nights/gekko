@@ -173,7 +173,7 @@ Shims can declare MoonBit registry dependencies in `moonbit/moon.mod` or `[tools
 | `List(a)` | `@gprelude.GList[A]` | `Nil` \| `Cons(A, GList[A])`, `GList::from_array`, `GList::to_array` |
 | `BitArray` | `@gprelude.BitArray` | `{ data: Bytes, bit_length: Int64 }`, `BitArray::empty`, `from_bytes`, `from_string`, `concat` |
 | `Result(a, b)` | `Result[A, B]` | `Ok(a)` \| `Err(b)` |
-| `Option(a)` | `Option[A]` | `Some(a)` \| `None` (via `gleam_stdlib` type override) |
+| `Option(a)` | `Option[A]` | `Some(a)` \| `None` (built-in default for `gleam_stdlib`) |
 | `Dynamic` | `@gprelude.Dynamic` | `DynNull`, `DynBool`, `DynInt`, `DynFloat`, `DynString`, `DynBitArray`, `DynList`, `DynArray`, `DynMap` |
 | `#()`, `#(a)` | `@gprelude.Tuple0`, `@gprelude.Tuple1[A]` | Boxed 0-tuple and 1-tuple wrappers |
 | `#(a, b, ...)` | `(A, B, ...)` | Native MoonBit tuples (2+ elements) |

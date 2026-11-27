@@ -169,6 +169,8 @@ pub fn overlay_merging_conflict_and_root_resolution_test() {
       authorized_shims: dict.new(),
       overrides: dict.new(),
       type_overrides: dict.new(),
+      gleam_type_patches: dict.new(),
+      patch_mirrors: dict.new(),
       module_patches: dict.new(),
       target_branches: dict.new(),
     )
@@ -574,6 +576,8 @@ pub fn dependency_overlay_security_scoping_test() {
       authorized_shims: dict.new(),
       overrides: dict.new(),
       type_overrides: dict.new(),
+      gleam_type_patches: dict.new(),
+      patch_mirrors: dict.new(),
       module_patches: dict.new(),
       target_branches: dict.new(),
     )
@@ -1535,6 +1539,591 @@ pub fn main() -> Int {
   let chk =
     cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
   assert chk.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+pub fn prepass_and_ffi_config_patch_type_and_mirror_test() {
+  let mirror_src =
+    "//// @patch_mirror(\"upstream:up/m\")
+import up/m as target_m
+
+/// @mirror_type(\"PrivNode\")
+pub type PrivNode {
+  Leaf(Int)
+}
+
+/// @mirror_opaque(\"Tok\")
+pub type Tok {
+  Tok(value: Int)
+}
+
+/// @mirror_to_public(\"Tok\")
+pub fn to_tok(value: Tok) -> target_m.Tok {
+  let _ = value
+  panic as \"gekko @patch_mirror stub\"
+}
+
+/// @mirror_from_public(\"Tok\")
+pub fn from_tok(value: target_m.Tok) -> Tok {
+  let _ = value
+  panic as \"gekko @patch_mirror stub\"
+}
+
+/// @mirror_const(\"tag\")
+pub const tag: String = \"\"
+
+/// @mirror_fn(\"helper\")
+pub fn helper(x: Int) -> PrivNode {
+  let _ = x
+  panic as \"gekko @patch_mirror stub\"
+}
+"
+  let mirror_res =
+    prepass.preprocess_module("s/internal/upstream/up/m", mirror_src)
+  let assert Some(info) = mirror_res.patch_mirror
+  assert info.target == "upstream:up/m"
+  assert list.length(info.decls) == 6
+
+  let shim_src =
+    "/// @patch_type(\"up/m.Handle\")
+pub type Handle {
+  Handle(id: Int)
+}
+"
+  let shim_res = prepass.preprocess_module("s/up/m", shim_src)
+  assert shim_res.gleam_type_patches
+    == [
+      prepass.GleamTypePatchEntry(
+        source_module: "s/up/m",
+        source_type: "Handle",
+        target: "up/m.Handle",
+        line: 1,
+      ),
+    ]
+
+  // Discovery + duplicate & conflict checks + security confinement
+  let root = "build/test_fixtures/patch_type_mirror_cfg"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  assert simplifile.create_directory_all(filepath.join(
+      root,
+      "src/s/internal/upstream/up",
+    ))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gekko_up\"\nversion = \"0.1.0\"\n[tools.gekko.shim_for]\npackage = \"upstream\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/s/m.gleam"),
+      contents: shim_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "src/s/internal/upstream/up/m.gleam"),
+      contents: mirror_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(ov) = ffi_config.load_package_overlay(root, "gekko_up")
+  assert dict.get(ov.gleam_type_patches, "upstream:up/m.Handle")
+    == Ok(prepass.GleamTypePatch(source_module: "s/m", source_type: "Handle"))
+  assert dict.get(ov.patch_mirrors, "s/internal/upstream/up/m")
+    == Ok("upstream:up/m")
+
+  // Unauthorized dependency mirror/type patch must fail security check
+  assert ffi_config.merge_overlays(
+      [ov],
+      ffi_config.PackageOverlay(
+        source_pkg: "app",
+        shim: None,
+        authorized_shims: dict.new(),
+        overrides: dict.new(),
+        type_overrides: dict.new(),
+        gleam_type_patches: dict.new(),
+        patch_mirrors: dict.new(),
+        module_patches: dict.new(),
+        target_branches: dict.new(),
+      ),
+    )
+    |> is_error
+
+  // Conflict with [tools.gekko.type_overrides] errors
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gekko_up\"\nversion = \"0.1.0\"\n[tools.gekko.shim_for]\npackage = \"upstream\"\n[tools.gekko.type_overrides.\"upstream:up/m.Handle\"]\npackage = \"gprelude\"\ntype = \"Dynamic\"\n",
+    )
+    == Ok(Nil)
+  let assert Error(conf_err) = ffi_config.load_package_overlay(root, "gekko_up")
+  assert string.contains(conf_err, "Conflicting")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  Nil
+}
+
+pub fn gleam_patch_type_end_to_end_test() {
+  let base = "build/test_fixtures/patch_type_e2e"
+  let up_dir = filepath.join(base, "upstream")
+  let shim_dir = filepath.join(base, "gekko_upstream")
+  let app_dir = filepath.join(base, "consumer_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      shim_dir,
+      "src/gekko_upstream/ffi",
+    ))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      shim_dir,
+      "src/gekko_upstream/up",
+    ))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "test"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/box.gleam"),
+      contents: "pub type ExtBox
+
+type Transient(k, v)
+
+@external(erlang, \"e\", \"new_b\")
+pub fn new_box(x: a) -> ExtBox
+
+@external(erlang, \"e\", \"to_t\")
+fn to_transient(k: k, v: v) -> Transient(k, v)
+
+@external(erlang, \"e\", \"read_t\")
+fn read_transient(t: Transient(k, v)) -> #(k, v)
+
+pub fn roundtrip(k: k, v: v) -> #(k, v) {
+  read_transient(to_transient(k, v))
+}
+
+pub fn box_roundtrip(b: ExtBox) -> String {
+  unbox(to_ext_t(b))
+}
+
+@external(erlang, \"e\", \"to_et\")
+fn to_ext_t(b: ExtBox) -> ExtTransient
+
+@external(erlang, \"e\", \"unbox\")
+fn unbox(t: ExtTransient) -> String
+
+type ExtTransient
+
+pub type Handle
+
+@external(erlang, \"e\", \"mk_h\")
+pub fn make_handle(n: Int) -> Handle
+
+@external(erlang, \"e\", \"get_h\")
+pub fn read_handle(h: Handle) -> Int
+",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n[tools.gekko.shim_for]\npackage = \"upstream\"\nversion = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "src/gekko_upstream/ffi/ext.gleam"),
+      contents: "/// @external_type(moonbit, \"gprelude\", \"Dynamic\")
+pub type DynBox
+
+/// @external(moonbit, \"gprelude\", \"to_dynamic\")
+pub fn box_val(x: a) -> DynBox {
+  let _ = x
+  panic as \"Implemented in MoonBit\"
+}
+
+pub fn unwrap_or(b: DynBox, fallback: String) -> String {
+  let _ = b
+  fallback
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "src/gekko_upstream/up/box.gleam"),
+      contents: "import gekko_upstream/ffi/ext
+
+/// @patch_type(\"upstream:up/box.ExtBox\")
+pub type ExtBox =
+  ext.DynBox
+
+/// @patch_type(\"upstream:up/box.ExtTransient\")
+pub type ExtTransient =
+  ExtBox
+
+/// @patch(\"upstream:up/box.new_box\")
+pub fn new_box(x: a) -> ExtBox {
+  ext.box_val(x)
+}
+
+/// @patch(\"upstream:up/box.to_ext_t\")
+pub fn to_ext_t(b: ExtBox) -> ExtTransient {
+  b
+}
+
+/// @patch(\"upstream:up/box.unbox\")
+pub fn unbox(t: ExtTransient) -> String {
+  ext.unwrap_or(t, \"unboxed\")
+}
+
+/// @patch_type(\"upstream:up/box.Transient\")
+pub type Transient(k, v) =
+  #(k, v)
+
+/// @patch(\"upstream:up/box.to_transient\")
+pub fn to_transient(k: k, v: v) -> Transient(k, v) {
+  #(k, v)
+}
+
+/// @patch(\"upstream:up/box.read_transient\")
+pub fn read_transient(t: Transient(k, v)) -> #(k, v) {
+  t
+}
+
+/// @patch_type(\"upstream:up/box.Handle\")
+pub type Handle {
+  Handle(id: Int)
+}
+
+/// @patch(\"upstream:up/box.make_handle\")
+pub fn make_handle(n: Int) -> Handle {
+  Handle(id: n * 2)
+}
+
+/// @patch(\"upstream:up/box.read_handle\")
+pub fn read_handle(h: Handle) -> Int {
+  h.id
+}
+",
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"consumer_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\ngekko_upstream = { path = \"../gekko_upstream\" }\n[tools.gekko.use_shims]\nupstream = \"gekko_upstream\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/consumer_app.gleam"),
+      contents: "import up/box
+
+pub fn run() -> #(#(String, Int), Int, String) {
+  #(
+    box.roundtrip(\"a\", 7),
+    box.read_handle(box.make_handle(21)),
+    box.box_roundtrip(box.new_box(\"ok\")),
+  )
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "test/consumer_app_test.gleam"),
+      contents: "import consumer_app
+
+pub fn patch_type_e2e_test() {
+  assert consumer_app.run() == #(#(\"a\", 7), 42, \"unboxed\")
+}
+",
+    )
+    == Ok(Nil)
+
+  let gchk = cmd.run("gleam", ["check"], shim_dir)
+  assert gchk.exit_code == 0
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Ok(summary) = workspace.transpile_project(app_dir, out_dir)
+  assert summary.missing_externals == []
+
+  let chk =
+    cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
+  assert chk.exit_code == 0
+  let tst = cmd.run("moon", ["test", "--target", "wasm"], out_dir)
+  assert tst.exit_code == 0
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+pub fn gleam_patch_mirror_e2e_and_sync_test() {
+  let base = "build/test_fixtures/patch_mirror_e2e"
+  let up_dir = filepath.join(base, "upstream")
+  let shim_dir = filepath.join(base, "gekko_upstream")
+  let app_dir = filepath.join(base, "consumer_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "src"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(app_dir, "test"))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  let initial_up_src =
+    "type Node {
+  Leaf(Int)
+  Pair(Node, Node)
+}
+
+const prefix = \"v1:\"
+
+fn format_node(prefix_tag tag: String, node n: Node) -> String {
+  case n {
+    Leaf(x) -> tag <> case x > 0 { True -> \"+\" False -> \"0\" }
+    Pair(a, b) -> format_node(prefix_tag: tag, node: a) <> \",\" <> format_node(prefix_tag: tag, node: b)
+  }
+}
+
+pub fn show_leaf(x: Int) -> String {
+  format_node(prefix_tag: prefix, node: Leaf(x))
+}
+
+pub opaque type Token {
+  Ident(name: String)
+  Number(value: Int)
+  Eof
+}
+
+pub fn format_token(t: Token) -> String {
+  case t {
+    Ident(name:) -> \"id:\" <> name
+    Number(_) -> \"num\"
+    Eof -> \"eof\"
+  }
+}
+
+@external(erlang, \"e\", \"tok\")
+pub fn tokenize(src: String) -> Token
+
+@external(erlang, \"e\", \"eval\")
+fn eval_node(x: Int) -> String
+
+pub fn run_eval(x: Int) -> String {
+  eval_node(x)
+}
+"
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/tok.gleam"),
+      contents: initial_up_src,
+    )
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"consumer_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/consumer_app.gleam"),
+      contents: "pub fn placeholder() -> Int { 0 }\n",
+    )
+    == Ok(Nil)
+
+  // Scaffold companion shim with internal/upstream mirror
+  let assert Ok(_) =
+    shim_cli.new_shim_with_style(
+      app_dir,
+      "upstream",
+      Some(shim_dir),
+      shim_cli.GleamShim,
+    )
+  let mirror_path =
+    filepath.join(shim_dir, "src/gekko_upstream/internal/upstream/up/tok.gleam")
+  let assert Ok(mirror_src) = simplifile.read(mirror_path)
+  assert string.contains(mirror_src, "//// @patch_mirror(\"upstream:up/tok\")")
+  assert string.contains(mirror_src, "/// @mirror_type(\"Node\")")
+  assert string.contains(mirror_src, "/// @mirror_opaque(\"Token\")")
+  assert string.contains(mirror_src, "/// @mirror_to_public(\"Token\")")
+  assert string.contains(mirror_src, "/// @mirror_from_public(\"Token\")")
+  assert string.contains(mirror_src, "/// @mirror_const(\"prefix\")")
+  assert string.contains(mirror_src, "/// @mirror_fn(\"format_node\")")
+
+  // Point shim gleam.toml at local ../upstream and check generated stubs pass gleam check
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "gleam.toml"),
+      contents: "name = \"gekko_upstream\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n[tools.gekko.shim_for]\npackage = \"upstream\"\nversion = \">= 1.0.0 and < 2.0.0\"\n",
+    )
+    == Ok(Nil)
+  let gchk0 = cmd.run("gleam", ["check"], shim_dir)
+  assert gchk0.exit_code == 0
+
+  // Write pure-Gleam patches using upstream private items & opaque bridges
+  assert simplifile.write(
+      to: filepath.join(shim_dir, "src/gekko_upstream/up/tok.gleam"),
+      contents: "import gekko_upstream/internal/upstream/up/tok as upstream
+import up/tok
+
+/// @patch(\"up/tok.tokenize\")
+pub fn tokenize(src: String) -> upstream.Token {
+  let local = case src {
+    \"\" -> upstream.Eof
+    \"num\" -> upstream.Number(value: 7)
+    s -> upstream.Ident(name: s)
+  }
+  let pub_tok = upstream.to_token(local)
+  case tok.format_token(pub_tok) {
+    \"eof\" -> upstream.Eof
+    _ -> upstream.from_token(pub_tok)
+  }
+}
+
+/// @patch(\"up/tok.eval_node\")
+pub fn eval_node(x: Int) -> String {
+  let tree = upstream.Pair(upstream.Leaf(x), upstream.Leaf(0))
+  upstream.format_node(prefix_tag: upstream.prefix, node: tree)
+}
+",
+    )
+    == Ok(Nil)
+  let gchk1 = cmd.run("gleam", ["check"], shim_dir)
+  assert gchk1.exit_code == 0
+
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"consumer_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\ngekko_upstream = { path = \"../gekko_upstream\" }\n[tools.gekko.use_shims]\nupstream = \"gekko_upstream\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/consumer_app.gleam"),
+      contents: "import up/tok
+
+pub fn run() -> #(String, String, String, String) {
+  #(
+    tok.format_token(tok.tokenize(\"\")),
+    tok.format_token(tok.tokenize(\"num\")),
+    tok.format_token(tok.tokenize(\"abc\")),
+    tok.run_eval(5),
+  )
+}
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "test/consumer_app_test.gleam"),
+      contents: "import consumer_app
+
+pub fn mirror_e2e_test() {
+  assert consumer_app.run() == #(\"eof\", \"num\", \"id:abc\", \"v1:+,v1:0\")
+}
+",
+    )
+    == Ok(Nil)
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Ok(summary) = workspace.transpile_project(app_dir, out_dir)
+  assert summary.missing_externals == []
+  assert simplifile.is_directory(filepath.join(
+      out_dir,
+      "gekko_upstream/internal/upstream/up/tok",
+    ))
+    != Ok(True)
+
+  let chk =
+    cmd.run("moon", ["check", "--deny-warn", "--target", "wasm"], out_dir)
+  assert chk.exit_code == 0
+  let tst = cmd.run("moon", ["test", "--target", "wasm"], out_dir)
+  assert tst.exit_code == 0
+
+  // Drift detection + gekko shim sync
+  let mutated_up_src = string.replace(initial_up_src, "prefix_tag", "label")
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/tok.gleam"),
+      contents: mutated_up_src,
+    )
+    == Ok(Nil)
+  // Clear cached dep build so updated upstream source is reloaded
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(app_dir, "build"))
+  let _ = simplifile.delete(file_or_dir_at: filepath.join(shim_dir, "build"))
+  let assert Error(drift_err) = workspace.transpile_project(app_dir, out_dir)
+  assert string.contains(drift_err, "Mirror drift")
+  assert string.contains(drift_err, "gekko shim sync")
+
+  let assert Ok(sync_msg) = shim_cli.sync_shims(shim_dir)
+  assert string.contains(sync_msg, "Updated @patch_mirror")
+  let assert Ok(synced_mirror) = simplifile.read(mirror_path)
+  assert string.contains(synced_mirror, "label tag: String")
+
+  let _ = simplifile.delete(file_or_dir_at: base)
+  Nil
+}
+
+pub fn gleam_patch_stray_mirror_ref_rejected_test() {
+  let base = "build/test_fixtures/stray_mirror_ref"
+  let up_dir = filepath.join(base, "upstream")
+  let app_dir = filepath.join(base, "my_app")
+  let _ = simplifile.delete(file_or_dir_at: base)
+
+  assert simplifile.create_directory_all(filepath.join(up_dir, "src/up"))
+    == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(
+      app_dir,
+      "src/my_app/internal/upstream/up",
+    ))
+    == Ok(Nil)
+
+  assert simplifile.write(
+      to: filepath.join(up_dir, "gleam.toml"),
+      contents: "name = \"upstream\"\nversion = \"1.0.0\"\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(up_dir, "src/up/m.gleam"),
+      contents: "const secret = 99
+pub fn ok() -> Int { 1 }
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "gleam.toml"),
+      contents: "name = \"my_app\"\nversion = \"0.1.0\"\n[dependencies]\nupstream = { path = \"../upstream\" }\n",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/my_app/internal/upstream/up/m.gleam"),
+      contents: "//// @patch_mirror(\"upstream:up/m\")
+
+/// @mirror_const(\"secret\")
+pub const secret: Int = 0
+",
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(app_dir, "src/my_app.gleam"),
+      contents: "import my_app/internal/upstream/up/m as upstream
+
+pub fn leak() -> Int {
+  upstream.secret
+}
+",
+    )
+    == Ok(Nil)
+
+  let out_dir = filepath.join(app_dir, "build/moonbit")
+  let assert Error(err) = workspace.transpile_project(app_dir, out_dir)
+  assert string.contains(err, "outside of a @patch targeting")
 
   let _ = simplifile.delete(file_or_dir_at: base)
   Nil

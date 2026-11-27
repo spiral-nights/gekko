@@ -12,8 +12,9 @@ import project/moonbit_lex
 import project/patch_discovery
 import project/paths
 import project/prepass.{
-  type ExternalType, type FfiKind, type TargetBranch, ExternalType, GleamPatch,
-  PackageCall, Patched, PreferErlang, PreferJavascript, WasmImport,
+  type ExternalType, type FfiKind, type GleamTypePatch, type TargetBranch,
+  ExternalType, GleamPatch, GleamTypePatch, PackageCall, Patched, PreferErlang,
+  PreferJavascript, WasmImport,
 }
 import simplifile
 import tom.{type Toml}
@@ -57,6 +58,8 @@ pub type PackageOverlay {
     authorized_shims: Dict(String, String),
     overrides: Dict(String, FfiKind),
     type_overrides: Dict(String, ExternalType),
+    gleam_type_patches: Dict(String, GleamTypePatch),
+    patch_mirrors: Dict(String, String),
     module_patches: Dict(String, ModulePatch),
     target_branches: Dict(String, TargetBranch),
   )
@@ -71,6 +74,10 @@ pub type MergedOverlays {
     override_sources: Dict(String, String),
     type_overrides: Dict(String, ExternalType),
     type_override_sources: Dict(String, String),
+    gleam_type_patches: Dict(String, GleamTypePatch),
+    gleam_type_patch_sources: Dict(String, String),
+    patch_mirrors: Dict(String, String),
+    patch_mirror_sources: Dict(String, String),
     module_patches: Dict(String, ModulePatch),
     module_patch_sources: Dict(String, String),
     target_branches: Dict(String, TargetBranch),
@@ -1084,10 +1091,9 @@ pub fn load_package_overlay(
 
   let #(patch_fn_overrides, patch_type_overrides) =
     expand_patch_entries(resolved_patches)
-  use gleam_patch_overrides <- result.try(discover_gleam_patches(
-    pkg_root,
-    target_pkg,
-  ))
+  use #(gleam_patch_overrides, gleam_type_patches, patch_mirrors) <- result.try(
+    discover_gleam_patch_bundle(pkg_root, target_pkg),
+  )
   use _ <- result.try(
     dict.keys(gleam_patch_overrides)
     |> list.try_each(fn(k) {
@@ -1095,6 +1101,25 @@ pub fn load_package_overlay(
         True ->
           Error(
             "Conflicting MoonBit #gekko.patch and Gleam @patch for '"
+            <> k
+            <> "' in package '"
+            <> pkg_name
+            <> "'",
+          )
+        False -> Ok(Nil)
+      }
+    }),
+  )
+  use _ <- result.try(
+    dict.keys(gleam_type_patches)
+    |> list.try_each(fn(k) {
+      case
+        dict.has_key(patch_type_overrides, k)
+        || dict.has_key(explicit_type_overrides, k)
+      {
+        True ->
+          Error(
+            "Conflicting MoonBit/config type_override and Gleam @patch_type for '"
             <> k
             <> "' in package '"
             <> pkg_name
@@ -1115,6 +1140,8 @@ pub fn load_package_overlay(
     authorized_shims:,
     overrides:,
     type_overrides:,
+    gleam_type_patches:,
+    patch_mirrors:,
     module_patches: resolved_patches,
     target_branches:,
   ))
@@ -1126,12 +1153,29 @@ pub fn discover_gleam_patches(
   pkg_root: String,
   target_pkg: Option(String),
 ) -> Result(Dict(String, FfiKind), String) {
+  use #(fn_patches, _, _) <- result.try(discover_gleam_patch_bundle(
+    pkg_root,
+    target_pkg,
+  ))
+  Ok(fn_patches)
+}
+
+/// Discover `@patch`, `@patch_type`, and `@patch_mirror` annotations across
+/// Gleam modules under `<pkg_root>/src/`.
+pub fn discover_gleam_patch_bundle(
+  pkg_root: String,
+  target_pkg: Option(String),
+) -> Result(
+  #(Dict(String, FfiKind), Dict(String, GleamTypePatch), Dict(String, String)),
+  String,
+) {
   let src_dir = filepath.join(pkg_root, "src")
   case simplifile.is_directory(src_dir) {
     Ok(True) -> {
       use rel_paths <- result.try(collect_gleam_src_files(src_dir, ""))
       list.sort(rel_paths, string.compare)
-      |> list.try_fold(dict.new(), fn(acc, rel) {
+      |> list.try_fold(#(dict.new(), dict.new(), dict.new()), fn(acc, rel) {
+        let #(fn_acc, ty_acc, mirror_acc) = acc
         let mod_name = filepath.strip_extension(rel)
         let full_path = filepath.join(src_dir, rel)
         use src <- result.try(fs.read_text(full_path))
@@ -1141,39 +1185,122 @@ pub fn discover_gleam_patches(
           False -> Ok(acc)
           True -> {
             let res = prepass.preprocess_module(mod_name, src)
-            list.try_fold(res.gleam_patches, acc, fn(inner_acc, entry) {
-              use key <- result.try(qualify_gleam_patch_target(
-                entry.target,
-                target_pkg,
-                full_path,
-                entry.line,
-              ))
-              case dict.has_key(inner_acc, key) {
-                True ->
-                  Error(
-                    "Duplicate @patch target '"
-                    <> key
-                    <> "' at "
-                    <> full_path
-                    <> ":"
-                    <> int.to_string(entry.line),
-                  )
-                False ->
-                  Ok(dict.insert(
-                    inner_acc,
-                    key,
-                    GleamPatch(
-                      source_module: entry.source_module,
-                      source_function: entry.source_function,
-                    ),
+            use next_fn <- result.try(
+              list.try_fold(res.gleam_patches, fn_acc, fn(inner_acc, entry) {
+                use key <- result.try(qualify_gleam_patch_target(
+                  entry.target,
+                  target_pkg,
+                  full_path,
+                  entry.line,
+                ))
+                case dict.has_key(inner_acc, key) {
+                  True ->
+                    Error(
+                      "Duplicate @patch target '"
+                      <> key
+                      <> "' at "
+                      <> full_path
+                      <> ":"
+                      <> int.to_string(entry.line),
+                    )
+                  False ->
+                    Ok(dict.insert(
+                      inner_acc,
+                      key,
+                      GleamPatch(
+                        source_module: entry.source_module,
+                        source_function: entry.source_function,
+                      ),
+                    ))
+                }
+              }),
+            )
+            use next_ty <- result.try(
+              list.try_fold(
+                res.gleam_type_patches,
+                ty_acc,
+                fn(inner_acc, entry) {
+                  use key <- result.try(qualify_gleam_patch_target(
+                    entry.target,
+                    target_pkg,
+                    full_path,
+                    entry.line,
                   ))
+                  case dict.has_key(inner_acc, key) {
+                    True ->
+                      Error(
+                        "Duplicate @patch_type target '"
+                        <> key
+                        <> "' at "
+                        <> full_path
+                        <> ":"
+                        <> int.to_string(entry.line),
+                      )
+                    False ->
+                      Ok(dict.insert(
+                        inner_acc,
+                        key,
+                        GleamTypePatch(
+                          source_module: entry.source_module,
+                          source_type: entry.source_type,
+                        ),
+                      ))
+                  }
+                },
+              ),
+            )
+            use next_mirror <- result.try(case res.patch_mirror {
+              None -> Ok(mirror_acc)
+              Some(info) -> {
+                use qualified_mod <- result.try(qualify_mirror_target(
+                  info.target,
+                  target_pkg,
+                  full_path,
+                  info.line,
+                ))
+                Ok(dict.insert(mirror_acc, info.mirror_module, qualified_mod))
               }
             })
+            Ok(#(next_fn, next_ty, next_mirror))
           }
         }
       })
     }
-    _ -> Ok(dict.new())
+    _ -> Ok(#(dict.new(), dict.new(), dict.new()))
+  }
+}
+
+fn qualify_mirror_target(
+  target: String,
+  target_pkg: Option(String),
+  file_path: String,
+  line: Int,
+) -> Result(String, String) {
+  let loc = file_path <> ":" <> int.to_string(line)
+  let invalid = fn() {
+    Error(
+      "Invalid @patch_mirror target '"
+      <> target
+      <> "' at "
+      <> loc
+      <> " (expected \"module\" or \"pkg:module\")",
+    )
+  }
+  case string.split_once(target, ":") {
+    Ok(#(pkg, mod_part)) ->
+      case pkg != "" && mod_part != "" && !string.contains(mod_part, ".") {
+        True -> Ok(target)
+        False -> invalid()
+      }
+    Error(_) ->
+      case target != "" && !string.contains(target, ".") {
+        True ->
+          case target_pkg {
+            Some(tp) -> Ok(tp <> ":" <> target)
+            None -> Ok(target)
+          }
+        False -> invalid()
+      }
   }
 }
 
@@ -1452,6 +1579,18 @@ pub fn merge_overlays(
     fn(ov) { ov.type_overrides },
     "type_override",
   ))
+  use #(g_ty_map, g_ty_src) <- result.try(merge_keyed_with_root(
+    dep_overlays,
+    root_overlay,
+    fn(ov) { ov.gleam_type_patches },
+    "gleam_type_patch",
+  ))
+  use #(mirror_map, mirror_src) <- result.try(merge_keyed_with_root(
+    dep_overlays,
+    root_overlay,
+    fn(ov) { ov.patch_mirrors },
+    "patch_mirror",
+  ))
   use #(br_map, _) <- result.try(merge_keyed_with_root(
     dep_overlays,
     root_overlay,
@@ -1486,6 +1625,10 @@ pub fn merge_overlays(
     override_sources: ovr_src,
     type_overrides: ty_map,
     type_override_sources: ty_src,
+    gleam_type_patches: g_ty_map,
+    gleam_type_patch_sources: g_ty_src,
+    patch_mirrors: mirror_map,
+    patch_mirror_sources: mirror_src,
     module_patches: patch_map,
     module_patch_sources: patch_src,
     target_branches: br_map,
@@ -1556,6 +1699,8 @@ fn validate_dep_overlay_scope(
   let has_any =
     !dict.is_empty(dep.overrides)
     || !dict.is_empty(dep.type_overrides)
+    || !dict.is_empty(dep.gleam_type_patches)
+    || !dict.is_empty(dep.patch_mirrors)
     || !dict.is_empty(dep.module_patches)
     || !dict.is_empty(dep.target_branches)
   case has_any, dep.shim {
@@ -1617,6 +1762,8 @@ fn validate_dep_overlay_scope(
       }
       use _ <- result.try(check_keys(dict.keys(dep.overrides), False))
       use _ <- result.try(check_keys(dict.keys(dep.type_overrides), False))
+      use _ <- result.try(check_keys(dict.keys(dep.gleam_type_patches), False))
+      use _ <- result.try(check_keys(dict.values(dep.patch_mirrors), True))
       use _ <- result.try(check_keys(dict.keys(dep.module_patches), False))
       check_keys(dict.keys(dep.target_branches), True)
     }

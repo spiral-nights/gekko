@@ -63,6 +63,46 @@ pub type GleamPatchEntry {
   )
 }
 
+/// Target upstream type patched by a Gleam type or type alias (`/// @patch_type(...)`).
+pub type GleamTypePatch {
+  GleamTypePatch(source_module: String, source_type: String)
+}
+
+/// An extracted `/// @patch_type("mod.Type")` mapping attached to a Gleam type or alias.
+pub type GleamTypePatchEntry {
+  GleamTypePatchEntry(
+    source_module: String,
+    source_type: String,
+    target: String,
+    line: Int,
+  )
+}
+
+/// Kind of mirror declaration inside a `//// @patch_mirror("pkg:mod")` module.
+pub type MirrorDeclKind {
+  MirrorType(target_name: String)
+  MirrorOpaque(target_name: String)
+  MirrorToPublic(target_type: String)
+  MirrorFromPublic(target_type: String)
+  MirrorFn(target_name: String)
+  MirrorConst(target_name: String)
+}
+
+/// A mirrored declaration inside a `//// @patch_mirror(...)` module.
+pub type MirrorDeclEntry {
+  MirrorDeclEntry(local_name: String, kind: MirrorDeclKind, line: Int)
+}
+
+/// Extracted metadata and declarations for a `//// @patch_mirror(...)` module.
+pub type PatchMirrorInfo {
+  PatchMirrorInfo(
+    mirror_module: String,
+    target: String,
+    line: Int,
+    decls: List(MirrorDeclEntry),
+  )
+}
+
 /// An extracted `@external_type(moonbit, ...)` mapping bound to a custom type.
 pub type ExternalTypeEntry {
   ExternalTypeEntry(
@@ -81,6 +121,8 @@ pub type PrepassResult {
     ffi_entries: List(FfiEntry),
     external_types: List(ExternalTypeEntry),
     gleam_patches: List(GleamPatchEntry),
+    gleam_type_patches: List(GleamTypePatchEntry),
+    patch_mirror: Option(PatchMirrorInfo),
   )
 }
 
@@ -102,9 +144,14 @@ type ScanState {
     pending_fns: List(PendingFfi),
     pending_types: List(PendingExternalType),
     pending_patches: List(PendingPatch),
+    pending_type_patches: List(PendingPatch),
+    pending_mirrors: List(#(MirrorDeclKind, Int)),
     entries: List(FfiEntry),
     ext_types: List(ExternalTypeEntry),
     patch_entries: List(GleamPatchEntry),
+    type_patch_entries: List(GleamTypePatchEntry),
+    mirror_target: Option(#(String, Int)),
+    mirror_decls: List(MirrorDeclEntry),
     edits: List(TextEdit),
   )
 }
@@ -133,20 +180,37 @@ pub fn preprocess_module(module_name: String, source: String) -> PrepassResult {
       pending_fns: [],
       pending_types: [],
       pending_patches: [],
+      pending_type_patches: [],
+      pending_mirrors: [],
       entries: [],
       ext_types: [],
       patch_entries: [],
+      type_patch_entries: [],
+      mirror_target: None,
+      mirror_decls: [],
       edits: [],
     )
   let final = scan_tokens(tokens, source, module_name, init_state)
 
   let cleaned_source = apply_edits(source, final.edits)
+  let patch_mirror = case final.mirror_target {
+    Some(#(target, line)) ->
+      Some(PatchMirrorInfo(
+        mirror_module: module_name,
+        target:,
+        line:,
+        decls: list.reverse(final.mirror_decls),
+      ))
+    None -> None
+  }
 
   PrepassResult(
     cleaned_source:,
     ffi_entries: list.reverse(final.entries),
     external_types: list.reverse(final.ext_types),
     gleam_patches: list.reverse(final.patch_entries),
+    gleam_type_patches: list.reverse(final.type_patch_entries),
+    patch_mirror:,
   )
 }
 
@@ -161,7 +225,14 @@ pub fn parse_module(
 }
 
 fn clear_pending(st: ScanState) -> ScanState {
-  ScanState(..st, pending_fns: [], pending_types: [], pending_patches: [])
+  ScanState(
+    ..st,
+    pending_fns: [],
+    pending_types: [],
+    pending_patches: [],
+    pending_type_patches: [],
+    pending_mirrors: [],
+  )
 }
 
 fn scan_tokens(
@@ -191,14 +262,29 @@ fn scan_tokens(
         ),
       )
 
-    // Skip whitespace & regular/module comments without dropping pending pragmas.
-    [#(token.Space(_), _), ..rest]
-    | [#(token.CommentNormal(_), _), ..rest]
-    | [#(token.CommentModule(_), _), ..rest] ->
+    // Skip whitespace & regular comments without dropping pending pragmas.
+    [#(token.Space(_), _), ..rest] | [#(token.CommentNormal(_), _), ..rest] ->
+      scan_tokens(rest, source, module_name, st)
+
+    // Module doc comment at top level: check for `//// @patch_mirror(...)`
+    [#(token.CommentModule(doc_text), pos), ..rest] if st.brace_depth == 0 -> {
+      let line = byte_offset_to_line(source, pos.byte_offset)
+      let mirror_target = case st.mirror_target {
+        Some(_) -> st.mirror_target
+        None ->
+          case parse_doc_named_pragmas(doc_text, "patch_mirror") {
+            [target, ..] -> Some(#(target, line))
+            [] -> None
+          }
+      }
+      scan_tokens(rest, source, module_name, ScanState(..st, mirror_target:))
+    }
+
+    [#(token.CommentModule(_), _), ..rest] ->
       scan_tokens(rest, source, module_name, st)
 
     // Doc comment at top level: check for `/// @external(...)`, `/// @external_type(...)`,
-    // and `/// @patch(...)` / `/// @gekko.patch(...)`.
+    // `/// @patch(...)`, `/// @patch_type(...)`, and `/// @mirror_*(...)`.
     [#(token.CommentDoc(doc_text), pos), ..rest] if st.brace_depth == 0 -> {
       let line = byte_offset_to_line(source, pos.byte_offset)
       let pending_fns = case parse_doc_pragma(doc_text) {
@@ -217,15 +303,34 @@ fn scan_tokens(
       }
       let pending_patches =
         list.fold(
-          parse_doc_patch_pragmas(doc_text),
+          parse_doc_named_pragmas(doc_text, "patch"),
           st.pending_patches,
           fn(acc, target) { [PendingPatch(target:, line:), ..acc] },
+        )
+      let pending_type_patches =
+        list.fold(
+          parse_doc_named_pragmas(doc_text, "patch_type"),
+          st.pending_type_patches,
+          fn(acc, target) { [PendingPatch(target:, line:), ..acc] },
+        )
+      let pending_mirrors =
+        list.fold(
+          parse_doc_mirror_pragmas(doc_text),
+          st.pending_mirrors,
+          fn(acc, kind) { [#(kind, line), ..acc] },
         )
       scan_tokens(
         rest,
         source,
         module_name,
-        ScanState(..st, pending_fns:, pending_types:, pending_patches:),
+        ScanState(
+          ..st,
+          pending_fns:,
+          pending_types:,
+          pending_patches:,
+          pending_type_patches:,
+          pending_mirrors:,
+        ),
       )
     }
 
@@ -299,8 +404,8 @@ fn scan_tokens(
           }
         [#(token.Type, _), ..after_type] ->
           handle_top_type(after_type, source, module_name, st)
-        [#(token.Const, _), ..rest] ->
-          scan_tokens(rest, source, module_name, clear_pending(st))
+        [#(token.Const, _), ..after_const] ->
+          handle_top_const(after_const, source, module_name, st)
         _ -> scan_tokens(after_ws, source, module_name, clear_pending(st))
       }
     }
@@ -318,13 +423,52 @@ fn scan_tokens(
     [#(token.Type, _), ..after_type] if st.brace_depth == 0 ->
       handle_top_type(after_type, source, module_name, st)
 
+    [#(token.Const, _), ..after_const] if st.brace_depth == 0 ->
+      handle_top_const(after_const, source, module_name, st)
+
     // Non-matching top-level declaration clears stray pending pragmas
-    [#(token.Const, _), ..rest]
-      | [#(token.Import, _), ..rest]
-      if st.brace_depth == 0
-    -> scan_tokens(rest, source, module_name, clear_pending(st))
+    [#(token.Import, _), ..rest] if st.brace_depth == 0 ->
+      scan_tokens(rest, source, module_name, clear_pending(st))
 
     [_, ..rest] -> scan_tokens(rest, source, module_name, st)
+  }
+}
+
+fn handle_top_const(
+  after_const: List(#(Token, glexer.Position)),
+  source: String,
+  module_name: String,
+  st: ScanState,
+) -> ScanState {
+  case skip_trivia(after_const) {
+    [#(token.Name(const_name), _), ..rest] -> {
+      let new_mirrors =
+        st.pending_mirrors
+        |> list.reverse
+        |> list.filter_map(fn(p) {
+          let #(kind, line) = p
+          case kind {
+            MirrorConst(_) ->
+              Ok(MirrorDeclEntry(local_name: const_name, kind:, line:))
+            _ -> Error(Nil)
+          }
+        })
+      let mirror_decls =
+        list.fold(new_mirrors, st.mirror_decls, fn(acc, e) { [e, ..acc] })
+      scan_tokens(
+        rest,
+        source,
+        module_name,
+        clear_pending(ScanState(..st, brace_depth: 0, mirror_decls:)),
+      )
+    }
+    other ->
+      scan_tokens(
+        other,
+        source,
+        module_name,
+        clear_pending(ScanState(..st, brace_depth: 0)),
+      )
   }
 }
 
@@ -350,11 +494,47 @@ fn handle_top_type(
         })
       let ext_types =
         list.fold(new_ext_types, st.ext_types, fn(acc, e) { [e, ..acc] })
+      let new_type_patches =
+        st.pending_type_patches
+        |> list.reverse
+        |> list.map(fn(p) {
+          GleamTypePatchEntry(
+            source_module: module_name,
+            source_type: type_name,
+            target: p.target,
+            line: p.line,
+          )
+        })
+      let type_patch_entries =
+        list.fold(new_type_patches, st.type_patch_entries, fn(acc, e) {
+          [e, ..acc]
+        })
+      let new_mirrors =
+        st.pending_mirrors
+        |> list.reverse
+        |> list.filter_map(fn(p) {
+          let #(kind, line) = p
+          case kind {
+            MirrorType(_) | MirrorOpaque(_) ->
+              Ok(MirrorDeclEntry(local_name: type_name, kind:, line:))
+            _ -> Error(Nil)
+          }
+        })
+      let mirror_decls =
+        list.fold(new_mirrors, st.mirror_decls, fn(acc, e) { [e, ..acc] })
       scan_tokens(
         rest,
         source,
         module_name,
-        clear_pending(ScanState(..st, brace_depth: 0, ext_types:)),
+        clear_pending(
+          ScanState(
+            ..st,
+            brace_depth: 0,
+            ext_types:,
+            type_patch_entries:,
+            mirror_decls:,
+          ),
+        ),
       )
     }
     other ->
@@ -405,6 +585,22 @@ fn handle_top_fn(
             })
           let patch_entries =
             list.fold(new_patches, st.patch_entries, fn(acc, e) { [e, ..acc] })
+          let new_mirrors =
+            st.pending_mirrors
+            |> list.reverse
+            |> list.filter_map(fn(p) {
+              let #(kind, line) = p
+              case kind {
+                MirrorFn(_)
+                | MirrorToPublic(_)
+                | MirrorFromPublic(_)
+                | MirrorConst(_) ->
+                  Ok(MirrorDeclEntry(local_name: fn_name, kind:, line:))
+                _ -> Error(Nil)
+              }
+            })
+          let mirror_decls =
+            list.fold(new_mirrors, st.mirror_decls, fn(acc, e) { [e, ..acc] })
 
           let #(edits, remaining) = case st.pending_fns {
             [] -> #(st.edits, params_tokens)
@@ -431,7 +627,14 @@ fn handle_top_fn(
             source,
             module_name,
             clear_pending(
-              ScanState(..st, brace_depth: 0, entries:, patch_entries:, edits:),
+              ScanState(
+                ..st,
+                brace_depth: 0,
+                entries:,
+                patch_entries:,
+                mirror_decls:,
+                edits:,
+              ),
             ),
           )
         }
@@ -467,14 +670,18 @@ fn parse_doc_external_type_pragma(doc_text: String) -> Option(ExternalType) {
   Some(ExternalType(package: pkg, type_name:))
 }
 
-fn parse_doc_patch_pragmas(doc_text: String) -> List(String) {
+fn parse_doc_named_pragmas(
+  doc_text: String,
+  directive_name: String,
+) -> List(String) {
   string.split(doc_text, "\n")
-  |> scan_doc_patch_lines(False, [])
+  |> scan_doc_named_lines(directive_name, False, [])
   |> list.reverse
 }
 
-fn scan_doc_patch_lines(
+fn scan_doc_named_lines(
   lines: List(String),
+  directive_name: String,
   in_fence: Bool,
   rev_acc: List(String),
 ) -> List(String) {
@@ -483,51 +690,103 @@ fn scan_doc_patch_lines(
     [line, ..rest] -> {
       let trimmed = string.trim(line)
       case string.starts_with(trimmed, "```") {
-        True -> scan_doc_patch_lines(rest, !in_fence, rev_acc)
+        True -> scan_doc_named_lines(rest, directive_name, !in_fence, rev_acc)
         False -> {
-          let next_acc = case
-            !in_fence
-            && {
-              string.starts_with(trimmed, "@patch")
-              || string.starts_with(trimmed, "@gekko.patch")
-            }
-          {
+          let next_acc = case !in_fence && string.starts_with(trimmed, "@") {
             True ->
-              case parse_single_doc_patch(trimmed) {
+              case parse_single_doc_named_target(trimmed, directive_name) {
                 Some(target) if target != "" -> [target, ..rev_acc]
                 _ -> rev_acc
               }
             False -> rev_acc
           }
-          scan_doc_patch_lines(rest, in_fence, next_acc)
+          scan_doc_named_lines(rest, directive_name, in_fence, next_acc)
         }
       }
     }
   }
 }
 
-fn parse_single_doc_patch(trimmed: String) -> Option(String) {
+fn parse_doc_mirror_pragmas(doc_text: String) -> List(MirrorDeclKind) {
+  string.split(doc_text, "\n")
+  |> scan_doc_mirror_lines(False, [])
+  |> list.reverse
+}
+
+fn scan_doc_mirror_lines(
+  lines: List(String),
+  in_fence: Bool,
+  rev_acc: List(MirrorDeclKind),
+) -> List(MirrorDeclKind) {
+  case lines {
+    [] -> rev_acc
+    [line, ..rest] -> {
+      let trimmed = string.trim(line)
+      case string.starts_with(trimmed, "```") {
+        True -> scan_doc_mirror_lines(rest, !in_fence, rev_acc)
+        False -> {
+          let next_acc = case !in_fence && string.starts_with(trimmed, "@") {
+            True ->
+              case parse_single_doc_mirror_pragma(trimmed) {
+                Some(kind) -> [kind, ..rev_acc]
+                None -> rev_acc
+              }
+            False -> rev_acc
+          }
+          scan_doc_mirror_lines(rest, in_fence, next_acc)
+        }
+      }
+    }
+  }
+}
+
+fn parse_single_doc_mirror_pragma(trimmed: String) -> Option(MirrorDeclKind) {
+  case extract_doc_directive_name_and_arg(trimmed) {
+    Some(#("mirror_type", arg)) if arg != "" -> Some(MirrorType(arg))
+    Some(#("mirror_opaque", arg)) if arg != "" -> Some(MirrorOpaque(arg))
+    Some(#("mirror_to_public", arg)) if arg != "" -> Some(MirrorToPublic(arg))
+    Some(#("mirror_from_public", arg)) if arg != "" ->
+      Some(MirrorFromPublic(arg))
+    Some(#("mirror_fn", arg)) if arg != "" -> Some(MirrorFn(arg))
+    Some(#("mirror_const", arg)) if arg != "" -> Some(MirrorConst(arg))
+    _ -> None
+  }
+}
+
+fn parse_single_doc_named_target(
+  trimmed: String,
+  directive_name: String,
+) -> Option(String) {
+  case extract_doc_directive_name_and_arg(trimmed) {
+    Some(#(name, target)) if name == directive_name -> Some(target)
+    _ -> None
+  }
+}
+
+fn extract_doc_directive_name_and_arg(
+  trimmed: String,
+) -> Option(#(String, String)) {
   let tokens =
     glexer.new(trimmed)
     |> glexer.lex
   case tokens {
     [#(token.At, _), ..after_at] -> {
-      let after_name = case skip_trivia(after_at) {
-        [#(token.Name("patch"), _), ..rest] -> Some(rest)
+      let parsed_name = case skip_trivia(after_at) {
         [#(token.Name("gekko"), _), ..after_gekko] ->
           case skip_trivia(after_gekko) {
             [#(token.Dot, _), ..after_dot] ->
               case skip_trivia(after_dot) {
-                [#(token.Name("patch"), _), ..rest] -> Some(rest)
+                [#(token.Name(name), _), ..rest] -> Some(#(name, rest))
                 _ -> None
               }
             _ -> None
           }
+        [#(token.Name(name), _), ..rest] -> Some(#(name, rest))
         _ -> None
       }
-      case after_name {
+      case parsed_name {
         None -> None
-        Some(rest) ->
+        Some(#(name, rest)) ->
           case skip_trivia(rest) {
             [#(token.LeftParen, _), ..after_lp] ->
               case skip_trivia(after_lp) {
@@ -535,7 +794,7 @@ fn parse_single_doc_patch(trimmed: String) -> Option(String) {
                   case match_trailing_close_paren(after_str, target, "") {
                     Some(#(t, _, _, remaining)) ->
                       case skip_trivia(remaining) {
-                        [] -> Some(t)
+                        [] -> Some(#(name, t))
                         _ -> None
                       }
                     None -> None

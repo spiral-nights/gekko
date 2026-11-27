@@ -2,28 +2,33 @@ import glance
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import index/symbol_table.{type SymbolTable}
+import index/symbol_table.{type SymbolTable, ConstructorInfo}
 import lower/ir.{
-  type IrBitSize, type IrConstant, type IrExpr, type IrFunction, type IrGetter,
-  type IrModule, type IrPattern, type IrStmt, type IrType, type IrTypeAlias,
-  type IrTypeDef, IrAbort, IrBinOp, IrBitSizeBinOp, IrBitSizeInt, IrBitSizeVar,
-  IrBitString, IrBlock, IrBool, IrBreak, IrCall, IrCallArg, IrClause, IrConstant,
-  IrConstructor, IrContinue, IrEcho, IrFloat, IrFn, IrForLoop, IrFunction,
-  IrGetterCall, IrInt, IrList, IrMatch, IrModule, IrModuleRef, IrNegateBool,
-  IrNegateInt, IrParam, IrPatArg, IrPatAs, IrPatBitString, IrPatBool,
-  IrPatDiscard, IrPatFloat, IrPatInt, IrPatString, IrPatTuple, IrPatUnit,
-  IrPatVar, IrPatVariant, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet,
-  IrString, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble,
-  IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString,
-  IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
+  type IrBitSize, type IrCallArg, type IrConstant, type IrExpr, type IrFunction,
+  type IrGetter, type IrModule, type IrPattern, type IrStmt, type IrType,
+  type IrTypeAlias, type IrTypeDef, IrAbort, IrBinOp, IrBitSizeBinOp,
+  IrBitSizeInt, IrBitSizeVar, IrBitString, IrBlock, IrBool, IrBreak, IrCall,
+  IrCallArg, IrClause, IrConstant, IrConstructor, IrContinue, IrEcho, IrFloat,
+  IrFn, IrFnParam, IrForLoop, IrFunction, IrGetter, IrGetterCall, IrInt, IrList,
+  IrMatch, IrModule, IrModuleRef, IrNegateBool, IrNegateInt, IrParam, IrPatArg,
+  IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt,
+  IrPatString, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrStmtAssert,
+  IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrTuple, IrTupleIndex,
+  IrTypeAlias, IrTypeBitArray, IrTypeBool, IrTypeDef, IrTypeDouble, IrTypeFn,
+  IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple,
+  IrTypeUnit, IrTypeVar, IrUnit, IrVar, IrVariant, IrVariantField,
 }
 import lower/ir_util
 import lower/mangle
-import project/prepass.{GleamPatch}
+import project/prepass.{
+  type GleamTypePatch, type MirrorDeclEntry, type PatchMirrorInfo, GleamPatch,
+  MirrorConst, MirrorFn, MirrorFromPublic, MirrorOpaque, MirrorToPublic,
+  MirrorType,
+}
 
 type ModIndex {
   ModIndex(
@@ -41,6 +46,10 @@ type SplicedTracker {
   SplicedTracker(
     /// `(source_module, mangled_fn_name)` entries that were spliced as `@patch`.
     spliced_fns: Set(#(String, String)),
+    /// `(source_module, ir_type_name)` entries that were spliced as `@patch_type`.
+    spliced_type_defs: Set(#(String, String)),
+    /// `(source_module, ir_alias_name)` entries that were spliced as `@patch_type`.
+    spliced_type_aliases: Set(#(String, String)),
   )
 }
 
@@ -48,23 +57,111 @@ type TypeBijection {
   TypeBijection(s_to_t: Dict(String, String), t_to_s: Dict(String, String))
 }
 
+type MirrorMap {
+  MirrorMap(
+    mirror_mod_name: String,
+    target_mod_name: String,
+    target_pkg_name: String,
+    type_map: Dict(String, String),
+    ctor_map: Dict(String, String),
+    to_public_fns: Set(String),
+    from_public_fns: Set(String),
+    fn_map: Dict(String, String),
+    const_map: Dict(String, String),
+    const_fn_map: Dict(String, String),
+  )
+}
+
+type PatchMaps {
+  PatchMaps(
+    mirrors_by_mod: Dict(String, MirrorMap),
+    /// `(source_mod, source_ir_or_unmangled_type) -> #(target_mod, target_ir_type, target_pkg)`
+    type_patch_map: Dict(#(String, String), #(String, String, String)),
+    /// `(source_mod, source_ctor) -> #(target_mod, target_ctor)`
+    type_patch_ctor_map: Dict(#(String, String), #(String, String)),
+    /// Modules indexed by name for `@patch_type` external-type inspection
+    mods_by_name: Dict(String, IrModule),
+  )
+}
+
 /// Splice Gleam-written `@patch("mod.fn")` functions (and their transitive
 /// private/module helpers and constants) directly into target `IrModule`s so
 /// shims can import target module types without creating MoonBit import cycles.
 pub fn splice_gleam_patches(
   ir_modules: List(IrModule),
-  _table: SymbolTable,
+  table: SymbolTable,
 ) -> Result(List(IrModule), String) {
+  use #(modules, _) <- result.try(splice_gleam_patches_with_overlays(
+    ir_modules,
+    table,
+    dict.new(),
+    dict.new(),
+    dict.new(),
+  ))
+  Ok(modules)
+}
+
+/// Splice Gleam-written `@patch_type("mod.Type")` and `@patch("mod.fn")`
+/// declarations, validate and erase `@patch_mirror` modules, and return the
+/// updated IR modules and synchronized `SymbolTable`.
+pub fn splice_gleam_patches_with_overlays(
+  ir_modules: List(IrModule),
+  table: SymbolTable,
+  gleam_type_patches: Dict(String, GleamTypePatch),
+  patch_mirrors: Dict(String, PatchMirrorInfo),
+  module_pkg_by_name: Dict(String, String),
+) -> Result(#(List(IrModule), SymbolTable), String) {
   let mods_by_name =
     list.fold(ir_modules, dict.new(), fn(acc, m) {
       dict.insert(acc, m.module_name, m)
     })
-  let indices = dict.map_values(mods_by_name, fn(_k, m) { build_mod_index(m) })
   let all_aliases = build_alias_map(ir_modules)
-  let all_patches_by_source = collect_all_patches_by_source(ir_modules)
 
+  // Phase 1: Validate all @patch_mirror modules against upstream IR & build MirrorMaps
+  use mirrors_by_mod <- result.try(validate_and_build_mirrors(
+    patch_mirrors,
+    mods_by_name,
+    all_aliases,
+    module_pkg_by_name,
+  ))
+
+  // Phase 2: Collect & splice @patch_type definitions into target modules
+  use
+    #(
+      after_types_mods,
+      next_table,
+      type_patch_map,
+      type_patch_ctor_map,
+      tracker0,
+    )
+  <- result.try(splice_all_type_patches(
+    ir_modules,
+    table,
+    gleam_type_patches,
+    mirrors_by_mod,
+    mods_by_name,
+    module_pkg_by_name,
+  ))
+
+  // Rebuild maps after @patch_type splicing so @patch fns see patched types/aliases
+  let mods_by_name =
+    list.fold(after_types_mods, dict.new(), fn(acc, m) {
+      dict.insert(acc, m.module_name, m)
+    })
+  let indices = dict.map_values(mods_by_name, fn(_k, m) { build_mod_index(m) })
+  let all_aliases = build_alias_map(after_types_mods)
+  let patch_maps =
+    PatchMaps(
+      mirrors_by_mod:,
+      type_patch_map:,
+      type_patch_ctor_map:,
+      mods_by_name:,
+    )
+  let all_patches_by_source = collect_all_patches_by_source(after_types_mods)
+
+  // Phase 3: Splice @patch functions with mirror & @patch_type rewriting
   use #(rev_updated, tracker) <- result.try(
-    list.try_fold(ir_modules, #([], SplicedTracker(set.new())), fn(acc, mod) {
+    list.try_fold(after_types_mods, #([], tracker0), fn(acc, mod) {
       let #(mods_acc, cur_tracker) = acc
       use #(next_mod, next_tracker) <- result.try(splice_target_module(
         mod,
@@ -72,13 +169,28 @@ pub fn splice_gleam_patches(
         indices,
         all_aliases,
         all_patches_by_source,
+        patch_maps,
         cur_tracker,
       ))
       Ok(#([next_mod, ..mods_acc], next_tracker))
     }),
   )
   let spliced_modules = list.reverse(rev_updated)
-  Ok(list.map(spliced_modules, prune_source_module(_, tracker, indices)))
+
+  // Phase 4: Prune source modules, drop @patch_mirror modules, reject stray mirror refs
+  let without_mirrors =
+    list.filter(spliced_modules, fn(m) {
+      !dict.has_key(mirrors_by_mod, m.module_name)
+    })
+  let pruned =
+    list.map(without_mirrors, prune_source_module(
+      _,
+      tracker,
+      indices,
+      patch_maps,
+    ))
+  use _ <- result.try(validate_no_stray_mirror_refs(pruned, mirrors_by_mod))
+  Ok(#(pruned, next_table))
 }
 
 fn build_mod_index(mod: IrModule) -> ModIndex {
@@ -166,6 +278,7 @@ fn splice_target_module(
   indices: Dict(String, ModIndex),
   all_aliases: Dict(#(String, String), IrTypeAlias),
   all_patches_by_source: Dict(String, Dict(String, Dict(String, String))),
+  patch_maps: PatchMaps,
   tracker: SplicedTracker,
 ) -> Result(#(IrModule, SplicedTracker), String) {
   let has_gleam_patches =
@@ -221,6 +334,7 @@ fn splice_target_module(
                   target_mod,
                   target_fn,
                   all_aliases,
+                  patch_maps,
                 ))
 
                 let same_target_map =
@@ -238,13 +352,15 @@ fn splice_target_module(
                     target_mod,
                     target_fn,
                     same_target_map,
+                    patch_maps,
                     used_names,
                   ),
                 )
 
                 let next_tracker =
                   SplicedTracker(
-                    set.insert(cur_tracker.spliced_fns, #(
+                    ..cur_tracker,
+                    spliced_fns: set.insert(cur_tracker.spliced_fns, #(
                       source_module,
                       source_fn.name,
                     )),
@@ -348,6 +464,7 @@ fn validate_patch_signature(
   target_mod: IrModule,
   target_fn: IrFunction,
   all_aliases: Dict(#(String, String), IrTypeAlias),
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   let s_label = source_mod.module_name <> "." <> source_fn.unmangled_name
   let t_label = target_mod.module_name <> "." <> target_fn.unmangled_name
@@ -373,9 +490,21 @@ fn validate_patch_signature(
           use cur_bij <- result.try(acc)
           let #(sp, tp) = pair
           let ns =
-            normalize_type(sp.param_type, source_mod.module_name, all_aliases)
+            normalize_type_for_patch(
+              sp.param_type,
+              source_mod.module_name,
+              target_mod.module_name,
+              all_aliases,
+              patch_maps,
+            )
           let nt =
-            normalize_type(tp.param_type, target_mod.module_name, all_aliases)
+            normalize_type_for_patch(
+              tp.param_type,
+              target_mod.module_name,
+              target_mod.module_name,
+              all_aliases,
+              patch_maps,
+            )
           case unify_sig_types(ns, nt, cur_bij) {
             Ok(next_bij) -> Ok(next_bij)
             Error(detail) ->
@@ -397,16 +526,20 @@ fn validate_patch_signature(
         }),
       )
       let ns_ret =
-        normalize_type(
+        normalize_type_for_patch(
           source_fn.return_type,
           source_mod.module_name,
-          all_aliases,
-        )
-      let nt_ret =
-        normalize_type(
-          target_fn.return_type,
           target_mod.module_name,
           all_aliases,
+          patch_maps,
+        )
+      let nt_ret =
+        normalize_type_for_patch(
+          target_fn.return_type,
+          target_mod.module_name,
+          target_mod.module_name,
+          all_aliases,
+          patch_maps,
         )
       case unify_sig_types(ns_ret, nt_ret, bij_after_params) {
         Ok(_) -> Ok(Nil)
@@ -423,6 +556,205 @@ fn validate_patch_signature(
             <> ")"
             <> detail,
           )
+      }
+    }
+  }
+}
+
+fn normalize_type_for_patch(
+  ty: IrType,
+  cur_mod: String,
+  target_mod_name: String,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+  patch_maps: PatchMaps,
+) -> IrType {
+  let remapped =
+    remap_type_for_patch_compare(ty, cur_mod, target_mod_name, patch_maps)
+  let expanded = normalize_type(remapped, cur_mod, all_aliases)
+  canonicalize_external_types(expanded, patch_maps.mods_by_name)
+}
+
+fn canonicalize_external_types(
+  ty: IrType,
+  mods_by_name: Dict(String, IrModule),
+) -> IrType {
+  case ty {
+    IrTypeInt64
+    | IrTypeDouble
+    | IrTypeString
+    | IrTypeBool
+    | IrTypeUnit
+    | IrTypeBitArray
+    | IrTypeVar(_) -> ty
+    IrTypeList(inner) ->
+      IrTypeList(canonicalize_external_types(inner, mods_by_name))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(
+        canonicalize_external_types(ok_t, mods_by_name),
+        canonicalize_external_types(err_t, mods_by_name),
+      )
+    IrTypeTuple(els) ->
+      IrTypeTuple(list.map(els, canonicalize_external_types(_, mods_by_name)))
+    IrTypeFn(ps, r) ->
+      IrTypeFn(
+        list.map(ps, canonicalize_external_types(_, mods_by_name)),
+        canonicalize_external_types(r, mods_by_name),
+      )
+    IrTypeNamed(module_alias:, package:, module:, name:, args:) -> {
+      let norm_args =
+        list.map(args, canonicalize_external_types(_, mods_by_name))
+      case dict.get(mods_by_name, module) {
+        Error(_) ->
+          IrTypeNamed(module_alias:, package:, module:, name:, args: norm_args)
+        Ok(m) ->
+          case find_ir_type(m, name) {
+            Some(td) ->
+              case td.external_type {
+                Some(prepass.ExternalType(package: ext_pkg, type_name: ext_ty)) -> {
+                  let norm_pkg = case ext_pkg {
+                    "" | "builtin" -> "moonbitlang/core/builtin"
+                    other -> other
+                  }
+                  case norm_pkg, ext_ty, norm_args {
+                    "moonbitlang/core/builtin", "String", [] -> IrTypeString
+                    "moonbitlang/core/builtin", "Int64", [] -> IrTypeInt64
+                    "moonbitlang/core/builtin", "Double", [] -> IrTypeDouble
+                    "moonbitlang/core/builtin", "Bool", [] -> IrTypeBool
+                    "moonbitlang/core/builtin", "Unit", [] -> IrTypeUnit
+                    _, _, _ ->
+                      IrTypeNamed(
+                        module_alias: None,
+                        package: "",
+                        module: "__external__:" <> norm_pkg,
+                        name: ext_ty,
+                        args: norm_args,
+                      )
+                  }
+                }
+                None ->
+                  IrTypeNamed(
+                    module_alias:,
+                    package:,
+                    module:,
+                    name:,
+                    args: norm_args,
+                  )
+              }
+            None ->
+              IrTypeNamed(
+                module_alias:,
+                package:,
+                module:,
+                name:,
+                args: norm_args,
+              )
+          }
+      }
+    }
+  }
+}
+
+fn remap_type_for_patch_compare(
+  ty: IrType,
+  cur_mod: String,
+  target_mod_name: String,
+  patch_maps: PatchMaps,
+) -> IrType {
+  case ty {
+    IrTypeInt64
+    | IrTypeDouble
+    | IrTypeString
+    | IrTypeBool
+    | IrTypeUnit
+    | IrTypeBitArray
+    | IrTypeVar(_) -> ty
+    IrTypeList(inner) ->
+      IrTypeList(remap_type_for_patch_compare(
+        inner,
+        cur_mod,
+        target_mod_name,
+        patch_maps,
+      ))
+    IrTypeResult(ok_t, err_t) ->
+      IrTypeResult(
+        remap_type_for_patch_compare(ok_t, cur_mod, target_mod_name, patch_maps),
+        remap_type_for_patch_compare(
+          err_t,
+          cur_mod,
+          target_mod_name,
+          patch_maps,
+        ),
+      )
+    IrTypeTuple(els) ->
+      IrTypeTuple(
+        list.map(els, remap_type_for_patch_compare(
+          _,
+          cur_mod,
+          target_mod_name,
+          patch_maps,
+        )),
+      )
+    IrTypeFn(ps, r) ->
+      IrTypeFn(
+        list.map(ps, remap_type_for_patch_compare(
+          _,
+          cur_mod,
+          target_mod_name,
+          patch_maps,
+        )),
+        remap_type_for_patch_compare(r, cur_mod, target_mod_name, patch_maps),
+      )
+    IrTypeNamed(module_alias:, package:, module:, name:, args:) -> {
+      let resolved_mod = case module {
+        "" -> cur_mod
+        m -> m
+      }
+      let new_args =
+        list.map(args, remap_type_for_patch_compare(
+          _,
+          cur_mod,
+          target_mod_name,
+          patch_maps,
+        ))
+      case dict.get(patch_maps.mirrors_by_mod, resolved_mod) {
+        Ok(mm) if mm.target_mod_name == target_mod_name ->
+          case dict.get(mm.type_map, name) {
+            Ok(target_name) ->
+              IrTypeNamed(
+                module_alias: None,
+                package: mm.target_pkg_name,
+                module: mm.target_mod_name,
+                name: target_name,
+                args: new_args,
+              )
+            Error(_) ->
+              IrTypeNamed(
+                module_alias:,
+                package:,
+                module: resolved_mod,
+                name:,
+                args: new_args,
+              )
+          }
+        _ ->
+          case dict.get(patch_maps.type_patch_map, #(resolved_mod, name)) {
+            Ok(#(tgt_mod, tgt_name, tgt_pkg)) ->
+              IrTypeNamed(
+                module_alias: None,
+                package: tgt_pkg,
+                module: tgt_mod,
+                name: tgt_name,
+                args: new_args,
+              )
+            Error(_) ->
+              IrTypeNamed(
+                module_alias:,
+                package:,
+                module: resolved_mod,
+                name:,
+                args: new_args,
+              )
+          }
       }
     }
   }
@@ -616,9 +948,13 @@ fn format_ir_type(ty: IrType) -> String {
       <> format_ir_type(r)
     IrTypeVar(v) -> v
     IrTypeNamed(module:, name:, args:, ..) -> {
-      let base = case module {
+      let clean_mod = case string.split_once(module, "__external__:") {
+        Ok(#("", rest)) -> rest
+        _ -> module
+      }
+      let base = case clean_mod {
         "" -> name
-        _ -> module <> "." <> name
+        _ -> clean_mod <> "." <> name
       }
       case args {
         [] -> base
@@ -652,6 +988,7 @@ fn splice_single_patch(
   target_mod: IrModule,
   target_fn: IrFunction,
   same_target_map: Dict(String, String),
+  patch_maps: PatchMaps,
   used_names: Set(String),
 ) -> Result(
   #(IrFunction, List(IrFunction), List(IrConstant), Set(String)),
@@ -679,6 +1016,7 @@ fn splice_single_patch(
             source_mod,
             src_idx,
             target_mod.module_name,
+            patch_maps,
           )
       })
       let merged_params =
@@ -692,6 +1030,7 @@ fn splice_single_patch(
               sp.param_type,
               source_mod,
               target_mod.module_name,
+              patch_maps,
             ),
           )
         })
@@ -706,6 +1045,7 @@ fn splice_single_patch(
             source_fn.return_type,
             source_mod,
             target_mod.module_name,
+            patch_maps,
           ),
           ffi: passthrough_ffi,
           external: False,
@@ -767,6 +1107,7 @@ fn splice_single_patch(
             source_mod,
             src_idx,
             target_mod.module_name,
+            patch_maps,
           )
       })
 
@@ -781,6 +1122,7 @@ fn splice_single_patch(
               sp.param_type,
               source_mod,
               target_mod.module_name,
+              patch_maps,
             ),
           )
         })
@@ -792,6 +1134,7 @@ fn splice_single_patch(
           source_mod,
           src_idx,
           target_mod.module_name,
+          patch_maps,
           helper_renames,
         )
 
@@ -806,6 +1149,7 @@ fn splice_single_patch(
             source_fn.return_type,
             source_mod,
             target_mod.module_name,
+            patch_maps,
           ),
           ffi: None,
           external: False,
@@ -829,6 +1173,7 @@ fn splice_single_patch(
                   p.param_type,
                   source_mod,
                   target_mod.module_name,
+                  patch_maps,
                 ),
               )
             })
@@ -839,6 +1184,7 @@ fn splice_single_patch(
               source_mod,
               src_idx,
               target_mod.module_name,
+              patch_maps,
               helper_renames,
             )
           IrFunction(
@@ -851,6 +1197,7 @@ fn splice_single_patch(
               hf.return_type,
               source_mod,
               target_mod.module_name,
+              patch_maps,
             ),
             ffi: hf.ffi,
             external: hf.external,
@@ -870,6 +1217,7 @@ fn splice_single_patch(
               hc.value_type,
               source_mod,
               target_mod.module_name,
+              patch_maps,
             ),
             value: rewrite_expr(
               hc.value,
@@ -877,6 +1225,7 @@ fn splice_single_patch(
               source_mod,
               src_idx,
               target_mod.module_name,
+              patch_maps,
               helper_renames,
             ),
           )
@@ -1561,6 +1910,7 @@ fn check_no_local_type_refs(
   source_mod: IrModule,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   let check_fn = fn(f: IrFunction) {
     use _ <- result.try(
@@ -1570,6 +1920,7 @@ fn check_no_local_type_refs(
           source_mod.module_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )
       }),
     )
@@ -1578,12 +1929,14 @@ fn check_no_local_type_refs(
       source_mod.module_name,
       src_idx,
       target_mod_name,
+      patch_maps,
     ))
     check_local_type_in_stmts(
       f.body,
       source_mod.module_name,
       src_idx,
       target_mod_name,
+      patch_maps,
     )
   }
   use _ <- result.try(check_fn(source_fn))
@@ -1594,12 +1947,14 @@ fn check_no_local_type_refs(
       source_mod.module_name,
       src_idx,
       target_mod_name,
+      patch_maps,
     ))
     check_local_type_in_expr(
       c.value,
       source_mod.module_name,
       src_idx,
       target_mod_name,
+      patch_maps,
     )
   })
 }
@@ -1622,23 +1977,61 @@ fn cycle_error(
   <> "'"
 }
 
+fn is_patched_local_type_for_target(
+  source_mod_name: String,
+  type_name: String,
+  target_mod_name: String,
+  patch_maps: PatchMaps,
+) -> Bool {
+  case dict.get(patch_maps.type_patch_map, #(source_mod_name, type_name)) {
+    Ok(#(tgt_mod, _, _)) -> tgt_mod == target_mod_name
+    Error(_) -> False
+  }
+}
+
+fn is_patched_local_ctor_for_target(
+  source_mod_name: String,
+  ctor_name: String,
+  target_mod_name: String,
+  patch_maps: PatchMaps,
+) -> Bool {
+  case dict.get(patch_maps.type_patch_ctor_map, #(source_mod_name, ctor_name)) {
+    Ok(#(tgt_mod, _)) -> tgt_mod == target_mod_name
+    Error(_) -> False
+  }
+}
+
 fn check_local_type_in_type(
   ty: IrType,
   source_mod_name: String,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   case ty {
     IrTypeList(inner) ->
-      check_local_type_in_type(inner, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_type(
+        inner,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     IrTypeResult(o, e) -> {
       use _ <- result.try(check_local_type_in_type(
         o,
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
-      check_local_type_in_type(e, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_type(
+        e,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     }
     IrTypeTuple(els) ->
       list.try_each(els, check_local_type_in_type(
@@ -1646,6 +2039,7 @@ fn check_local_type_in_type(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
     IrTypeFn(ps, r) -> {
       use _ <- result.try(
@@ -1654,14 +2048,32 @@ fn check_local_type_in_type(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )),
       )
-      check_local_type_in_type(r, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_type(
+        r,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     }
     IrTypeNamed(module:, name:, args:, ..) -> {
       let is_local = module == "" || module == source_mod_name
+      let patched_for_target =
+        is_patched_local_type_for_target(
+          source_mod_name,
+          name,
+          target_mod_name,
+          patch_maps,
+        )
       use _ <- result.try(
-        case is_local && set.contains(src_idx.type_names, name) {
+        case
+          is_local
+          && set.contains(src_idx.type_names, name)
+          && !patched_for_target
+        {
           True -> Error(cycle_error(source_mod_name, target_mod_name, name))
           False -> Ok(Nil)
         },
@@ -1671,6 +2083,7 @@ fn check_local_type_in_type(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
     }
     _ -> Ok(Nil)
@@ -1682,6 +2095,7 @@ fn check_local_type_in_stmts(
   source_mod_name: String,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   list.try_each(stmts, fn(stmt) {
     case stmt {
@@ -1691,6 +2105,7 @@ fn check_local_type_in_stmts(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         ))
         use _ <- result.try(case annotation {
           Some(ann) ->
@@ -1699,6 +2114,7 @@ fn check_local_type_in_stmts(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           None -> Ok(Nil)
         })
@@ -1707,6 +2123,7 @@ fn check_local_type_in_stmts(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )
       }
       IrStmtGuard(
@@ -1721,12 +2138,14 @@ fn check_local_type_in_stmts(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         ))
         use _ <- result.try(check_local_type_in_pattern(
           pattern,
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         ))
         use _ <- result.try(case guard_condition {
           Some(g) ->
@@ -1735,6 +2154,7 @@ fn check_local_type_in_stmts(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           None -> Ok(Nil)
         })
@@ -1745,6 +2165,7 @@ fn check_local_type_in_stmts(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           None -> Ok(Nil)
         })
@@ -1754,6 +2175,7 @@ fn check_local_type_in_stmts(
             source_mod_name,
             src_idx,
             target_mod_name,
+            patch_maps,
           )
         })
       }
@@ -1763,6 +2185,7 @@ fn check_local_type_in_stmts(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         ))
         case abort_message {
           Some(m) ->
@@ -1771,12 +2194,19 @@ fn check_local_type_in_stmts(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           None -> Ok(Nil)
         }
       }
       IrStmtExpr(e) ->
-        check_local_type_in_expr(e, source_mod_name, src_idx, target_mod_name)
+        check_local_type_in_expr(
+          e,
+          source_mod_name,
+          src_idx,
+          target_mod_name,
+          patch_maps,
+        )
     }
   })
 }
@@ -1786,12 +2216,24 @@ fn check_local_type_in_expr(
   source_mod_name: String,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   case expr {
     IrConstructor(target_module:, name:, ..) -> {
       let is_local =
         target_module == None || target_module == Some(source_mod_name)
-      case is_local && set.contains(src_idx.ctor_names, name) {
+      let patched_for_target =
+        is_patched_local_ctor_for_target(
+          source_mod_name,
+          name,
+          target_mod_name,
+          patch_maps,
+        )
+      case
+        is_local
+        && set.contains(src_idx.ctor_names, name)
+        && !patched_for_target
+      {
         True -> Error(cycle_error(source_mod_name, target_mod_name, name))
         False -> Ok(Nil)
       }
@@ -1802,9 +2244,16 @@ fn check_local_type_in_expr(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
     IrTupleIndex(tuple:, ..) ->
-      check_local_type_in_expr(tuple, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_expr(
+        tuple,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     IrList(elements:, tail:) -> {
       use _ <- result.try(
         list.try_each(elements, check_local_type_in_expr(
@@ -1812,11 +2261,18 @@ fn check_local_type_in_expr(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )),
       )
       case tail {
         Some(t) ->
-          check_local_type_in_expr(t, source_mod_name, src_idx, target_mod_name)
+          check_local_type_in_expr(
+            t,
+            source_mod_name,
+            src_idx,
+            target_mod_name,
+            patch_maps,
+          )
         None -> Ok(Nil)
       }
     }
@@ -1827,6 +2283,7 @@ fn check_local_type_in_expr(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         ))
         list.try_each(seg.1, fn(opt) {
           case opt {
@@ -1836,19 +2293,27 @@ fn check_local_type_in_expr(
                 source_mod_name,
                 src_idx,
                 target_mod_name,
+                patch_maps,
               )
             _ -> Ok(Nil)
           }
         })
       })
     IrNegateInt(i) | IrNegateBool(i) | IrBreak(i) ->
-      check_local_type_in_expr(i, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_expr(
+        i,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     IrGetterCall(receiver:, ..) ->
       check_local_type_in_expr(
         receiver,
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       )
     IrBinOp(left:, right:, ..) -> {
       use _ <- result.try(check_local_type_in_expr(
@@ -1856,8 +2321,15 @@ fn check_local_type_in_expr(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
-      check_local_type_in_expr(right, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_expr(
+        right,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     }
     IrCall(function:, args:) -> {
       use _ <- result.try(check_local_type_in_expr(
@@ -1865,6 +2337,7 @@ fn check_local_type_in_expr(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
       list.try_each(args, fn(a) {
         check_local_type_in_expr(
@@ -1872,6 +2345,7 @@ fn check_local_type_in_expr(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )
       })
     }
@@ -1881,6 +2355,7 @@ fn check_local_type_in_expr(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       )
     IrFn(params:, return_type:, body:) -> {
       use _ <- result.try(
@@ -1892,6 +2367,7 @@ fn check_local_type_in_expr(
                 source_mod_name,
                 src_idx,
                 target_mod_name,
+                patch_maps,
               )
             None -> Ok(Nil)
           }
@@ -1899,10 +2375,22 @@ fn check_local_type_in_expr(
       )
       use _ <- result.try(case return_type {
         Some(r) ->
-          check_local_type_in_type(r, source_mod_name, src_idx, target_mod_name)
+          check_local_type_in_type(
+            r,
+            source_mod_name,
+            src_idx,
+            target_mod_name,
+            patch_maps,
+          )
         None -> Ok(Nil)
       })
-      check_local_type_in_stmts(body, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_stmts(
+        body,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     }
     IrForLoop(bindings:, body:) -> {
       use _ <- result.try(
@@ -1912,10 +2400,17 @@ fn check_local_type_in_expr(
             source_mod_name,
             src_idx,
             target_mod_name,
+            patch_maps,
           )
         }),
       )
-      check_local_type_in_stmts(body, source_mod_name, src_idx, target_mod_name)
+      check_local_type_in_stmts(
+        body,
+        source_mod_name,
+        src_idx,
+        target_mod_name,
+        patch_maps,
+      )
     }
     IrMatch(subjects:, clauses:) -> {
       use _ <- result.try(
@@ -1924,6 +2419,7 @@ fn check_local_type_in_expr(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )),
       )
       list.try_each(clauses, fn(cl) {
@@ -1934,6 +2430,7 @@ fn check_local_type_in_expr(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             ))
           }),
         )
@@ -1944,6 +2441,7 @@ fn check_local_type_in_expr(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           None -> Ok(Nil)
         })
@@ -1954,6 +2452,7 @@ fn check_local_type_in_expr(
               source_mod_name,
               src_idx,
               target_mod_name,
+              patch_maps,
             )
           }),
         )
@@ -1962,6 +2461,7 @@ fn check_local_type_in_expr(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )
       })
     }
@@ -1971,17 +2471,30 @@ fn check_local_type_in_expr(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
       case message {
         Some(m) ->
-          check_local_type_in_expr(m, source_mod_name, src_idx, target_mod_name)
+          check_local_type_in_expr(
+            m,
+            source_mod_name,
+            src_idx,
+            target_mod_name,
+            patch_maps,
+          )
         None -> Ok(Nil)
       }
     }
     IrAbort(message:, ..) ->
       case message {
         Some(m) ->
-          check_local_type_in_expr(m, source_mod_name, src_idx, target_mod_name)
+          check_local_type_in_expr(
+            m,
+            source_mod_name,
+            src_idx,
+            target_mod_name,
+            patch_maps,
+          )
         None -> Ok(Nil)
       }
     _ -> Ok(Nil)
@@ -1993,6 +2506,7 @@ fn check_local_type_in_pattern(
   source_mod_name: String,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> Result(Nil, String) {
   case pat {
     IrPatTuple(els) ->
@@ -2001,6 +2515,7 @@ fn check_local_type_in_pattern(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       ))
     IrPatAs(inner, _) ->
       check_local_type_in_pattern(
@@ -2008,12 +2523,24 @@ fn check_local_type_in_pattern(
         source_mod_name,
         src_idx,
         target_mod_name,
+        patch_maps,
       )
     IrPatVariant(target_module:, constructor:, args:, ..) -> {
       let is_local =
         target_module == None || target_module == Some(source_mod_name)
+      let patched_for_target =
+        is_patched_local_ctor_for_target(
+          source_mod_name,
+          constructor,
+          target_mod_name,
+          patch_maps,
+        )
       use _ <- result.try(
-        case is_local && set.contains(src_idx.ctor_names, constructor) {
+        case
+          is_local
+          && set.contains(src_idx.ctor_names, constructor)
+          && !patched_for_target
+        {
           True ->
             Error(cycle_error(source_mod_name, target_mod_name, constructor))
           False -> Ok(Nil)
@@ -2025,6 +2552,7 @@ fn check_local_type_in_pattern(
           source_mod_name,
           src_idx,
           target_mod_name,
+          patch_maps,
         )
       })
     }
@@ -2044,47 +2572,54 @@ fn rewrite_ir_type(
   ty: IrType,
   source_mod: IrModule,
   target_mod_name: String,
+  patch_maps: PatchMaps,
 ) -> IrType {
   case ty {
     IrTypeList(inner) ->
-      IrTypeList(rewrite_ir_type(inner, source_mod, target_mod_name))
+      IrTypeList(rewrite_ir_type(inner, source_mod, target_mod_name, patch_maps))
     IrTypeResult(o, e) ->
       IrTypeResult(
-        rewrite_ir_type(o, source_mod, target_mod_name),
-        rewrite_ir_type(e, source_mod, target_mod_name),
+        rewrite_ir_type(o, source_mod, target_mod_name, patch_maps),
+        rewrite_ir_type(e, source_mod, target_mod_name, patch_maps),
       )
     IrTypeTuple(els) ->
       IrTypeTuple(
-        list.map(els, rewrite_ir_type(_, source_mod, target_mod_name)),
+        list.map(els, rewrite_ir_type(
+          _,
+          source_mod,
+          target_mod_name,
+          patch_maps,
+        )),
       )
     IrTypeFn(ps, r) ->
       IrTypeFn(
-        list.map(ps, rewrite_ir_type(_, source_mod, target_mod_name)),
-        rewrite_ir_type(r, source_mod, target_mod_name),
+        list.map(ps, rewrite_ir_type(_, source_mod, target_mod_name, patch_maps)),
+        rewrite_ir_type(r, source_mod, target_mod_name, patch_maps),
       )
     IrTypeNamed(module_alias:, package:, module:, name:, args:) -> {
       let new_args =
-        list.map(args, rewrite_ir_type(_, source_mod, target_mod_name))
-      case module == target_mod_name {
-        True ->
-          IrTypeNamed(
-            module_alias: None,
-            package:,
-            module:,
-            name:,
-            args: new_args,
-          )
-        False ->
-          case module == "" {
-            True ->
+        list.map(args, rewrite_ir_type(
+          _,
+          source_mod,
+          target_mod_name,
+          patch_maps,
+        ))
+      let resolved_mod = case module {
+        "" -> source_mod.module_name
+        m -> m
+      }
+      case dict.get(patch_maps.mirrors_by_mod, resolved_mod) {
+        Ok(mm) if mm.target_mod_name == target_mod_name ->
+          case dict.get(mm.type_map, name) {
+            Ok(target_ty_name) ->
               IrTypeNamed(
                 module_alias: None,
-                package: source_mod.package_name,
-                module: source_mod.module_name,
-                name:,
+                package: mm.target_pkg_name,
+                module: target_mod_name,
+                name: target_ty_name,
                 args: new_args,
               )
-            False ->
+            Error(_) ->
               IrTypeNamed(
                 module_alias:,
                 package:,
@@ -2092,6 +2627,58 @@ fn rewrite_ir_type(
                 name:,
                 args: new_args,
               )
+          }
+        _ ->
+          case dict.get(patch_maps.type_patch_map, #(resolved_mod, name)) {
+            Ok(#(patched_mod, patched_name, patched_pkg)) ->
+              case patched_mod == target_mod_name {
+                True ->
+                  IrTypeNamed(
+                    module_alias: None,
+                    package: patched_pkg,
+                    module: patched_mod,
+                    name: patched_name,
+                    args: new_args,
+                  )
+                False ->
+                  IrTypeNamed(
+                    module_alias: Some(mangle.module_to_alias(patched_mod)),
+                    package: patched_pkg,
+                    module: patched_mod,
+                    name: patched_name,
+                    args: new_args,
+                  )
+              }
+            Error(_) ->
+              case module == target_mod_name {
+                True ->
+                  IrTypeNamed(
+                    module_alias: None,
+                    package:,
+                    module:,
+                    name:,
+                    args: new_args,
+                  )
+                False ->
+                  case module == "" {
+                    True ->
+                      IrTypeNamed(
+                        module_alias: None,
+                        package: source_mod.package_name,
+                        module: source_mod.module_name,
+                        name:,
+                        args: new_args,
+                      )
+                    False ->
+                      IrTypeNamed(
+                        module_alias:,
+                        package:,
+                        module:,
+                        name:,
+                        args: new_args,
+                      )
+                  }
+              }
           }
       }
     }
@@ -2105,6 +2692,7 @@ fn rewrite_stmts(
   source_mod: IrModule,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
   renames: Dict(String, String),
 ) -> List(IrStmt) {
   let #(_, rev_out) =
@@ -2119,6 +2707,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_pat =
@@ -2128,6 +2717,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_ann =
@@ -2135,6 +2725,7 @@ fn rewrite_stmts(
               _,
               source_mod,
               target_mod_name,
+              patch_maps,
             ))
           let next_bound =
             set.union(cur_bound, ir_util.pattern_bound_vars(pattern))
@@ -2157,6 +2748,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_pat =
@@ -2166,6 +2758,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let pat_bound =
@@ -2177,6 +2770,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ))
           let new_abort =
@@ -2186,6 +2780,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ))
           let #(after_bound, rev_posts) =
@@ -2198,6 +2793,7 @@ fn rewrite_stmts(
                   source_mod,
                   src_idx,
                   target_mod_name,
+                  patch_maps,
                   renames,
                 )
               #(set.insert(b, pb.0), [#(pb.0, rewritten_pb), ..out_p])
@@ -2221,6 +2817,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_abort =
@@ -2230,6 +2827,7 @@ fn rewrite_stmts(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ))
           #(cur_bound, [
@@ -2244,6 +2842,7 @@ fn rewrite_stmts(
             source_mod,
             src_idx,
             target_mod_name,
+            patch_maps,
             renames,
           )),
           ..rev_acc
@@ -2259,6 +2858,7 @@ fn rewrite_expr(
   source_mod: IrModule,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
   renames: Dict(String, String),
 ) -> IrExpr {
   case expr {
@@ -2268,30 +2868,104 @@ fn rewrite_expr(
         False -> IrVar(rename_or_keep(name, renames))
       }
     IrModuleRef(module_alias:, target_module:, symbol:) ->
-      case target_module == target_mod_name {
-        True -> IrVar(symbol)
-        False ->
-          case target_module == source_mod.module_name {
-            True -> IrVar(rename_or_keep(symbol, renames))
-            False -> IrModuleRef(module_alias:, target_module:, symbol:)
-          }
-      }
-    IrConstructor(module_alias:, target_module:, name:) ->
-      case target_module == Some(target_mod_name) {
-        True -> IrConstructor(module_alias: None, target_module: None, name:)
-        False ->
-          case target_module == None && set.contains(src_idx.ctor_names, name) {
+      case dict.get(patch_maps.mirrors_by_mod, target_module) {
+        Ok(mm) if mm.target_mod_name == target_mod_name ->
+          case
+            set.contains(mm.to_public_fns, symbol)
+            || set.contains(mm.from_public_fns, symbol)
+          {
             True ->
-              IrConstructor(
-                module_alias: Some(mangle.module_to_alias(
-                  source_mod.module_name,
-                )),
-                target_module: Some(source_mod.module_name),
-                name:,
+              IrFn(
+                params: [IrFnParam(name: "__gekko_id", param_type: None)],
+                return_type: None,
+                body: [IrStmtExpr(IrVar("__gekko_id"))],
               )
-            False -> IrConstructor(module_alias:, target_module:, name:)
+            False ->
+              case dict.get(mm.fn_map, symbol) {
+                Ok(target_fn_sym) -> IrVar(target_fn_sym)
+                Error(_) ->
+                  case dict.get(mm.const_map, symbol) {
+                    Ok(target_const_sym) -> IrVar(target_const_sym)
+                    Error(_) ->
+                      case dict.get(mm.const_fn_map, symbol) {
+                        Ok(target_const_sym) ->
+                          IrFn(params: [], return_type: None, body: [
+                            IrStmtExpr(IrVar(target_const_sym)),
+                          ])
+                        Error(_) ->
+                          IrModuleRef(module_alias:, target_module:, symbol:)
+                      }
+                  }
+              }
+          }
+        _ ->
+          case target_module == target_mod_name {
+            True -> IrVar(symbol)
+            False ->
+              case target_module == source_mod.module_name {
+                True -> IrVar(rename_or_keep(symbol, renames))
+                False -> IrModuleRef(module_alias:, target_module:, symbol:)
+              }
           }
       }
+    IrConstructor(module_alias:, target_module:, name:) -> {
+      let resolved_ctor_mod = case target_module {
+        Some(m) -> m
+        None -> source_mod.module_name
+      }
+      case dict.get(patch_maps.mirrors_by_mod, resolved_ctor_mod) {
+        Ok(mm) if mm.target_mod_name == target_mod_name ->
+          case dict.get(mm.ctor_map, name) {
+            Ok(target_ctor) ->
+              IrConstructor(
+                module_alias: None,
+                target_module: None,
+                name: target_ctor,
+              )
+            Error(_) -> IrConstructor(module_alias:, target_module:, name:)
+          }
+        _ ->
+          case
+            dict.get(patch_maps.type_patch_ctor_map, #(resolved_ctor_mod, name))
+          {
+            Ok(#(patched_mod, patched_ctor)) ->
+              case patched_mod == target_mod_name {
+                True ->
+                  IrConstructor(
+                    module_alias: None,
+                    target_module: None,
+                    name: patched_ctor,
+                  )
+                False ->
+                  IrConstructor(
+                    module_alias: Some(mangle.module_to_alias(patched_mod)),
+                    target_module: Some(patched_mod),
+                    name: patched_ctor,
+                  )
+              }
+            Error(_) ->
+              case target_module == Some(target_mod_name) {
+                True ->
+                  IrConstructor(module_alias: None, target_module: None, name:)
+                False ->
+                  case
+                    target_module == None
+                    && set.contains(src_idx.ctor_names, name)
+                  {
+                    True ->
+                      IrConstructor(
+                        module_alias: Some(mangle.module_to_alias(
+                          source_mod.module_name,
+                        )),
+                        target_module: Some(source_mod.module_name),
+                        name:,
+                      )
+                    False -> IrConstructor(module_alias:, target_module:, name:)
+                  }
+              }
+          }
+      }
+    }
     IrInt(_) | IrFloat(_) | IrString(_) | IrBool(_) | IrUnit -> expr
     IrTuple(els) ->
       IrTuple(
@@ -2301,6 +2975,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
       )
@@ -2312,6 +2987,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
       )
@@ -2323,6 +2999,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
         index:,
@@ -2335,6 +3012,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
         tail: option.map(tail, rewrite_expr(
@@ -2343,6 +3021,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
       )
@@ -2356,6 +3035,7 @@ fn rewrite_expr(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_opts =
@@ -2368,6 +3048,7 @@ fn rewrite_expr(
                     source_mod,
                     src_idx,
                     target_mod_name,
+                    patch_maps,
                     renames,
                   ))
                 other -> coerce_bit_opt(other)
@@ -2383,6 +3064,7 @@ fn rewrite_expr(
         source_mod,
         src_idx,
         target_mod_name,
+        patch_maps,
         renames,
       ))
     IrNegateBool(inner) ->
@@ -2392,6 +3074,7 @@ fn rewrite_expr(
         source_mod,
         src_idx,
         target_mod_name,
+        patch_maps,
         renames,
       ))
     IrBreak(inner) ->
@@ -2401,6 +3084,7 @@ fn rewrite_expr(
         source_mod,
         src_idx,
         target_mod_name,
+        patch_maps,
         renames,
       ))
     IrGetterCall(receiver:, field:) ->
@@ -2411,6 +3095,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
         field:,
@@ -2424,6 +3109,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
         right: rewrite_expr(
@@ -2432,33 +3118,96 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
       )
     IrCall(function:, args:) ->
-      IrCall(
-        function: rewrite_expr(
-          function,
-          bound,
-          source_mod,
-          src_idx,
-          target_mod_name,
-          renames,
-        ),
-        args: list.map(args, fn(arg) {
-          IrCallArg(
-            label: arg.label,
-            value: rewrite_expr(
-              arg.value,
-              bound,
-              source_mod,
-              src_idx,
-              target_mod_name,
-              renames,
-            ),
+      case function, args {
+        IrModuleRef(target_module: m, symbol: sym, ..),
+          [IrCallArg(value: inner_val, ..)]
+        ->
+          case dict.get(patch_maps.mirrors_by_mod, m) {
+            Ok(mm) if mm.target_mod_name == target_mod_name ->
+              case
+                set.contains(mm.to_public_fns, sym)
+                || set.contains(mm.from_public_fns, sym)
+              {
+                True ->
+                  rewrite_expr(
+                    inner_val,
+                    bound,
+                    source_mod,
+                    src_idx,
+                    target_mod_name,
+                    patch_maps,
+                    renames,
+                  )
+                False ->
+                  rewrite_ir_call(
+                    function,
+                    args,
+                    bound,
+                    source_mod,
+                    src_idx,
+                    target_mod_name,
+                    patch_maps,
+                    renames,
+                  )
+              }
+            _ ->
+              rewrite_ir_call(
+                function,
+                args,
+                bound,
+                source_mod,
+                src_idx,
+                target_mod_name,
+                patch_maps,
+                renames,
+              )
+          }
+        IrModuleRef(target_module: m, symbol: sym, ..), [] ->
+          case dict.get(patch_maps.mirrors_by_mod, m) {
+            Ok(mm) if mm.target_mod_name == target_mod_name ->
+              case dict.get(mm.const_fn_map, sym) {
+                Ok(target_const_sym) -> IrVar(target_const_sym)
+                Error(_) ->
+                  rewrite_ir_call(
+                    function,
+                    args,
+                    bound,
+                    source_mod,
+                    src_idx,
+                    target_mod_name,
+                    patch_maps,
+                    renames,
+                  )
+              }
+            _ ->
+              rewrite_ir_call(
+                function,
+                args,
+                bound,
+                source_mod,
+                src_idx,
+                target_mod_name,
+                patch_maps,
+                renames,
+              )
+          }
+        _, _ ->
+          rewrite_ir_call(
+            function,
+            args,
+            bound,
+            source_mod,
+            src_idx,
+            target_mod_name,
+            patch_maps,
+            renames,
           )
-        }),
-      )
+      }
     IrBlock(stmts) ->
       IrBlock(rewrite_stmts(
         stmts,
@@ -2466,6 +3215,7 @@ fn rewrite_expr(
         source_mod,
         src_idx,
         target_mod_name,
+        patch_maps,
         renames,
       ))
     IrFn(params:, return_type:, body:) -> {
@@ -2479,6 +3229,7 @@ fn rewrite_expr(
               _,
               source_mod,
               target_mod_name,
+              patch_maps,
             )),
           )
         })
@@ -2488,6 +3239,7 @@ fn rewrite_expr(
           _,
           source_mod,
           target_mod_name,
+          patch_maps,
         )),
         body: rewrite_stmts(
           body,
@@ -2495,6 +3247,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
       )
@@ -2510,6 +3263,7 @@ fn rewrite_expr(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           #(set.insert(cur_b, b.0), [#(b.0, new_val), ..out])
@@ -2522,6 +3276,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
       )
@@ -2534,6 +3289,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
         clauses: list.map(clauses, fn(cl) {
@@ -2550,6 +3306,7 @@ fn rewrite_expr(
                       source_mod,
                       src_idx,
                       target_mod_name,
+                      patch_maps,
                       renames,
                     )
                   #(set.union(ib, ir_util.pattern_bound_vars(pat)), [
@@ -2566,6 +3323,7 @@ fn rewrite_expr(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ))
           let #(body_bound, rev_prefs) =
@@ -2578,6 +3336,7 @@ fn rewrite_expr(
                   source_mod,
                   src_idx,
                   target_mod_name,
+                  patch_maps,
                   renames,
                 )
               #(set.insert(b, pb.0), [#(pb.0, nv), ..out])
@@ -2592,6 +3351,7 @@ fn rewrite_expr(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ),
           )
@@ -2605,6 +3365,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
         message: option.map(message, rewrite_expr(
@@ -2613,6 +3374,7 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
         file_path:,
@@ -2627,10 +3389,48 @@ fn rewrite_expr(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
       )
   }
+}
+
+fn rewrite_ir_call(
+  function: IrExpr,
+  args: List(IrCallArg),
+  bound: Set(String),
+  source_mod: IrModule,
+  src_idx: ModIndex,
+  target_mod_name: String,
+  patch_maps: PatchMaps,
+  renames: Dict(String, String),
+) -> IrExpr {
+  IrCall(
+    function: rewrite_expr(
+      function,
+      bound,
+      source_mod,
+      src_idx,
+      target_mod_name,
+      patch_maps,
+      renames,
+    ),
+    args: list.map(args, fn(arg) {
+      IrCallArg(
+        label: arg.label,
+        value: rewrite_expr(
+          arg.value,
+          bound,
+          source_mod,
+          src_idx,
+          target_mod_name,
+          patch_maps,
+          renames,
+        ),
+      )
+    }),
+  )
 }
 
 fn coerce_bit_opt(
@@ -2645,6 +3445,7 @@ fn rewrite_pattern(
   source_mod: IrModule,
   src_idx: ModIndex,
   target_mod_name: String,
+  patch_maps: PatchMaps,
   renames: Dict(String, String),
 ) -> IrPattern {
   case pat {
@@ -2663,6 +3464,7 @@ fn rewrite_pattern(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         ),
         alias,
@@ -2675,6 +3477,7 @@ fn rewrite_pattern(
           source_mod,
           src_idx,
           target_mod_name,
+          patch_maps,
           renames,
         )),
       )
@@ -2685,26 +3488,56 @@ fn rewrite_pattern(
       args:,
       with_spread:,
     ) -> {
-      let #(next_alias, next_target) = case
-        target_module == Some(target_mod_name)
+      let resolved_ctor_mod = case target_module {
+        Some(m) -> m
+        None -> source_mod.module_name
+      }
+      let #(next_alias, next_target, next_ctor) = case
+        dict.get(patch_maps.mirrors_by_mod, resolved_ctor_mod)
       {
-        True -> #(None, None)
-        False ->
+        Ok(mm) if mm.target_mod_name == target_mod_name ->
+          case dict.get(mm.ctor_map, constructor) {
+            Ok(target_ctor) -> #(None, None, target_ctor)
+            Error(_) -> #(module_alias, target_module, constructor)
+          }
+        _ ->
           case
-            target_module == None
-            && set.contains(src_idx.ctor_names, constructor)
+            dict.get(patch_maps.type_patch_ctor_map, #(
+              resolved_ctor_mod,
+              constructor,
+            ))
           {
-            True -> #(
-              Some(mangle.module_to_alias(source_mod.module_name)),
-              Some(source_mod.module_name),
-            )
-            False -> #(module_alias, target_module)
+            Ok(#(patched_mod, patched_ctor)) ->
+              case patched_mod == target_mod_name {
+                True -> #(None, None, patched_ctor)
+                False -> #(
+                  Some(mangle.module_to_alias(patched_mod)),
+                  Some(patched_mod),
+                  patched_ctor,
+                )
+              }
+            Error(_) ->
+              case target_module == Some(target_mod_name) {
+                True -> #(None, None, constructor)
+                False ->
+                  case
+                    target_module == None
+                    && set.contains(src_idx.ctor_names, constructor)
+                  {
+                    True -> #(
+                      Some(mangle.module_to_alias(source_mod.module_name)),
+                      Some(source_mod.module_name),
+                      constructor,
+                    )
+                    False -> #(module_alias, target_module, constructor)
+                  }
+              }
           }
       }
       IrPatVariant(
         module_alias: next_alias,
         target_module: next_target,
-        constructor:,
+        constructor: next_ctor,
         args: list.map(args, fn(arg) {
           IrPatArg(
             label: arg.label,
@@ -2714,6 +3547,7 @@ fn rewrite_pattern(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             ),
           )
@@ -2732,6 +3566,7 @@ fn rewrite_pattern(
               source_mod,
               src_idx,
               target_mod_name,
+              patch_maps,
               renames,
             )
           let new_opts =
@@ -2779,29 +3614,87 @@ fn prune_source_module(
   mod: IrModule,
   tracker: SplicedTracker,
   indices: Dict(String, ModIndex),
+  patch_maps: PatchMaps,
 ) -> IrModule {
   let mod_idx =
     dict.get(indices, mod.module_name) |> result.unwrap(build_mod_index(mod))
-  let has_private_spliced =
-    list.any(mod.functions, fn(f) {
-      f.publicity == glance.Private
-      && set.contains(tracker.spliced_fns, #(mod.module_name, f.name))
+  let kept_types =
+    list.filter(mod.types, fn(td) {
+      !set.contains(tracker.spliced_type_defs, #(mod.module_name, td.name))
     })
-  case has_private_spliced {
-    False -> mod
+  let kept_getters =
+    list.filter(mod.getters, fn(g) {
+      !set.contains(tracker.spliced_type_defs, #(mod.module_name, g.type_name))
+    })
+  let kept_aliases =
+    list.filter(mod.type_aliases, fn(ta) {
+      !set.contains(tracker.spliced_type_aliases, #(mod.module_name, ta.name))
+    })
+  let pruned_local_types =
+    list.fold(mod.types, set.new(), fn(acc, td) {
+      case
+        set.contains(tracker.spliced_type_defs, #(mod.module_name, td.name))
+      {
+        True ->
+          acc
+          |> set.insert(td.name)
+          |> set.insert(td.unmangled_name)
+        False -> acc
+      }
+    })
+  let pruned_local_types =
+    list.fold(mod.type_aliases, pruned_local_types, fn(acc, ta) {
+      case
+        set.contains(tracker.spliced_type_aliases, #(mod.module_name, ta.name))
+      {
+        True -> set.insert(acc, ta.name)
+        False -> acc
+      }
+    })
+  let pruned_local_ctors =
+    list.fold(mod.types, set.new(), fn(acc, td) {
+      case
+        set.contains(tracker.spliced_type_defs, #(mod.module_name, td.name))
+      {
+        False -> acc
+        True ->
+          list.fold(td.variants, acc, fn(inner, v) { set.insert(inner, v.name) })
+      }
+    })
+
+  let should_prune_spliced_fn = fn(f: IrFunction) {
+    set.contains(tracker.spliced_fns, #(mod.module_name, f.name))
+    && {
+      f.publicity == glance.Private
+      || fn_uses_mirror_or_pruned(
+        f,
+        mod.module_name,
+        patch_maps.mirrors_by_mod,
+        pruned_local_types,
+        pruned_local_ctors,
+      )
+    }
+  }
+  let has_pruned_fns = list.any(mod.functions, should_prune_spliced_fn)
+  let mod_after_types =
+    IrModule(
+      ..mod,
+      types: kept_types,
+      type_aliases: kept_aliases,
+      getters: kept_getters,
+    )
+  case has_pruned_fns {
+    False -> mod_after_types
     True -> {
       let root_fns =
-        list.filter_map(mod.functions, fn(f) {
-          case
-            f.publicity != glance.Private
-            || !set.contains(tracker.spliced_fns, #(mod.module_name, f.name))
-          {
-            True -> Ok(f.name)
-            False -> Error(Nil)
+        list.filter_map(mod_after_types.functions, fn(f) {
+          case should_prune_spliced_fn(f) {
+            False -> Ok(f.name)
+            True -> Error(Nil)
           }
         })
       let root_consts =
-        list.filter_map(mod.constants, fn(c) {
+        list.filter_map(mod_after_types.constants, fn(c) {
           case c.publicity != glance.Private {
             True -> Ok(c.name)
             False -> Error(Nil)
@@ -2818,21 +3711,453 @@ fn prune_source_module(
         drain_worklist(
           root_fns,
           root_consts,
-          mod.module_name,
+          mod_after_types.module_name,
           mod_idx,
           dict.new(),
           init_col,
         )
       let kept_fns =
-        list.filter(mod.functions, fn(f) {
+        list.filter(mod_after_types.functions, fn(f) {
           set.contains(reachable.visited_fns, f.name)
         })
       let kept_consts =
-        list.filter(mod.constants, fn(c) {
+        list.filter(mod_after_types.constants, fn(c) {
           set.contains(reachable.visited_consts, c.name)
         })
-      IrModule(..mod, functions: kept_fns, constants: kept_consts)
+      IrModule(..mod_after_types, functions: kept_fns, constants: kept_consts)
     }
+  }
+}
+
+fn fn_uses_mirror_or_pruned(
+  f: IrFunction,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+  pruned_types: Set(String),
+  pruned_ctors: Set(String),
+) -> Bool {
+  list.any(f.params, fn(p) {
+    type_uses_mirror_or_pruned(p.param_type, cur_mod, mirrors, pruned_types)
+  })
+  || type_uses_mirror_or_pruned(f.return_type, cur_mod, mirrors, pruned_types)
+  || stmts_use_mirror_or_pruned(
+    f.body,
+    cur_mod,
+    mirrors,
+    pruned_types,
+    pruned_ctors,
+  )
+}
+
+fn type_uses_mirror_or_pruned(
+  ty: IrType,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+  pruned_types: Set(String),
+) -> Bool {
+  case ty {
+    IrTypeList(inner) ->
+      type_uses_mirror_or_pruned(inner, cur_mod, mirrors, pruned_types)
+    IrTypeResult(ok:, err:) ->
+      type_uses_mirror_or_pruned(ok, cur_mod, mirrors, pruned_types)
+      || type_uses_mirror_or_pruned(err, cur_mod, mirrors, pruned_types)
+    IrTypeTuple(els) ->
+      list.any(els, type_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+      ))
+    IrTypeFn(params:, return:) ->
+      list.any(params, type_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+      ))
+      || type_uses_mirror_or_pruned(return, cur_mod, mirrors, pruned_types)
+    IrTypeNamed(module:, name:, args:, ..) -> {
+      let resolved = case module {
+        "" -> cur_mod
+        m -> m
+      }
+      dict.has_key(mirrors, resolved)
+      || { resolved == cur_mod && set.contains(pruned_types, name) }
+      || list.any(args, type_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+      ))
+    }
+    _ -> False
+  }
+}
+
+fn stmts_use_mirror_or_pruned(
+  stmts: List(IrStmt),
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+  pruned_types: Set(String),
+  pruned_ctors: Set(String),
+) -> Bool {
+  list.any(stmts, fn(stmt) {
+    case stmt {
+      IrStmtLet(pattern:, annotation:, value:) ->
+        pattern_uses_mirror_or_pruned(pattern, cur_mod, mirrors, pruned_ctors)
+        || case annotation {
+          Some(t) ->
+            type_uses_mirror_or_pruned(t, cur_mod, mirrors, pruned_types)
+          None -> False
+        }
+        || expr_uses_mirror_or_pruned(
+          value,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+      IrStmtGuard(
+        value:,
+        pattern:,
+        guard_condition:,
+        abort_message:,
+        post_bindings:,
+      ) ->
+        expr_uses_mirror_or_pruned(
+          value,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+        || pattern_uses_mirror_or_pruned(
+          pattern,
+          cur_mod,
+          mirrors,
+          pruned_ctors,
+        )
+        || case guard_condition {
+          Some(g) ->
+            expr_uses_mirror_or_pruned(
+              g,
+              cur_mod,
+              mirrors,
+              pruned_types,
+              pruned_ctors,
+            )
+          None -> False
+        }
+        || case abort_message {
+          Some(m) ->
+            expr_uses_mirror_or_pruned(
+              m,
+              cur_mod,
+              mirrors,
+              pruned_types,
+              pruned_ctors,
+            )
+          None -> False
+        }
+        || list.any(post_bindings, fn(pb) {
+          expr_uses_mirror_or_pruned(
+            pb.1,
+            cur_mod,
+            mirrors,
+            pruned_types,
+            pruned_ctors,
+          )
+        })
+      IrStmtAssert(condition:, abort_message:) ->
+        expr_uses_mirror_or_pruned(
+          condition,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+        || case abort_message {
+          Some(m) ->
+            expr_uses_mirror_or_pruned(
+              m,
+              cur_mod,
+              mirrors,
+              pruned_types,
+              pruned_ctors,
+            )
+          None -> False
+        }
+      IrStmtExpr(e) ->
+        expr_uses_mirror_or_pruned(
+          e,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+    }
+  })
+}
+
+fn expr_uses_mirror_or_pruned(
+  expr: IrExpr,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+  pruned_types: Set(String),
+  pruned_ctors: Set(String),
+) -> Bool {
+  case expr {
+    IrModuleRef(target_module:, ..) -> dict.has_key(mirrors, target_module)
+    IrConstructor(target_module:, name:, ..) ->
+      case target_module {
+        Some(m) ->
+          dict.has_key(mirrors, m)
+          || { m == cur_mod && set.contains(pruned_ctors, name) }
+        None -> set.contains(pruned_ctors, name)
+      }
+    IrTuple(els) | IrContinue(els) ->
+      list.any(els, expr_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      ))
+    IrTupleIndex(tuple:, ..)
+    | IrNegateInt(tuple)
+    | IrNegateBool(tuple)
+    | IrBreak(tuple) ->
+      expr_uses_mirror_or_pruned(
+        tuple,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrGetterCall(receiver:, ..) ->
+      expr_uses_mirror_or_pruned(
+        receiver,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrList(elements:, tail:) ->
+      list.any(elements, expr_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      ))
+      || case tail {
+        Some(t) ->
+          expr_uses_mirror_or_pruned(
+            t,
+            cur_mod,
+            mirrors,
+            pruned_types,
+            pruned_ctors,
+          )
+        None -> False
+      }
+    IrBitString(segments:) ->
+      list.any(segments, fn(seg) {
+        expr_uses_mirror_or_pruned(
+          seg.0,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+      })
+    IrBinOp(left:, right:, ..) ->
+      expr_uses_mirror_or_pruned(
+        left,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+      || expr_uses_mirror_or_pruned(
+        right,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrCall(function:, args:) ->
+      expr_uses_mirror_or_pruned(
+        function,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+      || list.any(args, fn(a) {
+        expr_uses_mirror_or_pruned(
+          a.value,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+      })
+    IrBlock(stmts) ->
+      stmts_use_mirror_or_pruned(
+        stmts,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrFn(params:, return_type:, body:) ->
+      list.any(params, fn(p) {
+        case p.param_type {
+          Some(t) ->
+            type_uses_mirror_or_pruned(t, cur_mod, mirrors, pruned_types)
+          None -> False
+        }
+      })
+      || case return_type {
+        Some(r) -> type_uses_mirror_or_pruned(r, cur_mod, mirrors, pruned_types)
+        None -> False
+      }
+      || stmts_use_mirror_or_pruned(
+        body,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrForLoop(bindings:, body:) ->
+      list.any(bindings, fn(b) {
+        expr_uses_mirror_or_pruned(
+          b.1,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+      })
+      || stmts_use_mirror_or_pruned(
+        body,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+    IrMatch(subjects:, clauses:) ->
+      list.any(subjects, expr_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      ))
+      || list.any(clauses, fn(c) {
+        list.any(c.patterns, fn(alt) {
+          list.any(alt, pattern_uses_mirror_or_pruned(
+            _,
+            cur_mod,
+            mirrors,
+            pruned_ctors,
+          ))
+        })
+        || case c.guard {
+          Some(g) ->
+            expr_uses_mirror_or_pruned(
+              g,
+              cur_mod,
+              mirrors,
+              pruned_types,
+              pruned_ctors,
+            )
+          None -> False
+        }
+        || list.any(c.prefix_bindings, fn(pb) {
+          expr_uses_mirror_or_pruned(
+            pb.1,
+            cur_mod,
+            mirrors,
+            pruned_types,
+            pruned_ctors,
+          )
+        })
+        || expr_uses_mirror_or_pruned(
+          c.body,
+          cur_mod,
+          mirrors,
+          pruned_types,
+          pruned_ctors,
+        )
+      })
+    IrEcho(expr: inner, message:, ..) ->
+      expr_uses_mirror_or_pruned(
+        inner,
+        cur_mod,
+        mirrors,
+        pruned_types,
+        pruned_ctors,
+      )
+      || case message {
+        Some(m) ->
+          expr_uses_mirror_or_pruned(
+            m,
+            cur_mod,
+            mirrors,
+            pruned_types,
+            pruned_ctors,
+          )
+        None -> False
+      }
+    IrAbort(message:, ..) ->
+      case message {
+        Some(m) ->
+          expr_uses_mirror_or_pruned(
+            m,
+            cur_mod,
+            mirrors,
+            pruned_types,
+            pruned_ctors,
+          )
+        None -> False
+      }
+    _ -> False
+  }
+}
+
+fn pattern_uses_mirror_or_pruned(
+  pat: IrPattern,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+  pruned_ctors: Set(String),
+) -> Bool {
+  case pat {
+    IrPatTuple(els) ->
+      list.any(els, pattern_uses_mirror_or_pruned(
+        _,
+        cur_mod,
+        mirrors,
+        pruned_ctors,
+      ))
+    IrPatAs(inner, _) ->
+      pattern_uses_mirror_or_pruned(inner, cur_mod, mirrors, pruned_ctors)
+    IrPatVariant(target_module:, constructor:, args:, ..) ->
+      case target_module {
+        Some(m) ->
+          dict.has_key(mirrors, m)
+          || { m == cur_mod && set.contains(pruned_ctors, constructor) }
+        None -> set.contains(pruned_ctors, constructor)
+      }
+      || list.any(args, fn(a) {
+        pattern_uses_mirror_or_pruned(a.pattern, cur_mod, mirrors, pruned_ctors)
+      })
+    IrPatBitString(segments:) ->
+      list.any(segments, fn(seg) {
+        pattern_uses_mirror_or_pruned(seg.0, cur_mod, mirrors, pruned_ctors)
+      })
+    _ -> False
   }
 }
 
@@ -3239,5 +4564,1582 @@ fn record_ctor_type_ref(
   case dict.get(ctor_to_type, name) {
     Ok(type_name) -> set.insert(acc, type_name)
     Error(_) -> acc
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Phase 1: Validate @patch_mirror modules and construct MirrorMaps
+// -----------------------------------------------------------------------------
+
+fn validate_and_build_mirrors(
+  patch_mirrors: Dict(String, PatchMirrorInfo),
+  mods_by_name: Dict(String, IrModule),
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+  module_pkg_by_name: Dict(String, String),
+) -> Result(Dict(String, MirrorMap), String) {
+  dict.to_list(patch_mirrors)
+  |> list.try_fold(dict.new(), fn(acc, entry) {
+    let #(mirror_mod_name, info) = entry
+    use mirror_mod <- result.try(
+      dict.get(mods_by_name, mirror_mod_name)
+      |> result.map_error(fn(_) {
+        "Mirror module '" <> mirror_mod_name <> "' was not found in IR modules"
+      }),
+    )
+    use target_mod <- result.try(resolve_mirror_target_mod(
+      info,
+      mods_by_name,
+      module_pkg_by_name,
+    ))
+    let prelim = build_prelim_mirror_map(mirror_mod, target_mod, info.decls)
+    use _ <- result.try(validate_mirror_decls(
+      mirror_mod,
+      target_mod,
+      info,
+      prelim,
+      all_aliases,
+    ))
+    Ok(dict.insert(acc, mirror_mod_name, prelim))
+  })
+}
+
+fn resolve_mirror_target_mod(
+  info: PatchMirrorInfo,
+  mods_by_name: Dict(String, IrModule),
+  module_pkg_by_name: Dict(String, String),
+) -> Result(IrModule, String) {
+  let #(expected_pkg, mod_name) = case string.split_once(info.target, ":") {
+    Ok(#(p, m)) -> #(Some(p), m)
+    Error(_) -> #(None, info.target)
+  }
+  use target_mod <- result.try(
+    dict.get(mods_by_name, mod_name)
+    |> result.map_error(fn(_) {
+      "Mirror module '"
+      <> info.mirror_module
+      <> "' (line "
+      <> int.to_string(info.line)
+      <> ") targets unknown module '"
+      <> info.target
+      <> "'"
+    }),
+  )
+  case expected_pkg {
+    Some(p) ->
+      case dict.get(module_pkg_by_name, mod_name) {
+        Ok(actual) if actual != p ->
+          Error(
+            "Mirror module '"
+            <> info.mirror_module
+            <> "' targets '"
+            <> info.target
+            <> "', but module '"
+            <> mod_name
+            <> "' belongs to package '"
+            <> actual
+            <> "'",
+          )
+        _ -> Ok(target_mod)
+      }
+    None -> Ok(target_mod)
+  }
+}
+
+fn mirror_drift_error(
+  mirror_mod_name: String,
+  decl: MirrorDeclEntry,
+  reason: String,
+) -> String {
+  "Mirror drift in '"
+  <> mirror_mod_name
+  <> "' (line "
+  <> int.to_string(decl.line)
+  <> "): "
+  <> reason
+  <> ". Run 'gekko shim sync' to regenerate."
+}
+
+fn find_ir_type(mod: IrModule, name: String) -> Option(IrTypeDef) {
+  let mangled = mangle.mangle_type_name(name)
+  list.find(mod.types, fn(td) {
+    td.unmangled_name == name || td.name == name || td.name == mangled
+  })
+  |> option.from_result
+}
+
+fn find_ir_alias(mod: IrModule, name: String) -> Option(IrTypeAlias) {
+  let mangled = mangle.mangle_type_name(name)
+  list.find(mod.type_aliases, fn(ta) { ta.name == name || ta.name == mangled })
+  |> option.from_result
+}
+
+fn find_ir_fn(mod: IrModule, name: String) -> Option(IrFunction) {
+  let mangled = mangle.mangle_ident(name)
+  list.find(mod.functions, fn(f) {
+    f.unmangled_name == name || f.name == name || f.name == mangled
+  })
+  |> option.from_result
+}
+
+fn find_ir_const(mod: IrModule, name: String) -> Option(IrConstant) {
+  let mangled = mangle.mangle_ident(name)
+  list.find(mod.constants, fn(c) {
+    c.unmangled_name == name || c.name == name || c.name == mangled
+  })
+  |> option.from_result
+}
+
+fn build_prelim_mirror_map(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  decls: List(MirrorDeclEntry),
+) -> MirrorMap {
+  let init =
+    MirrorMap(
+      mirror_mod_name: mirror_mod.module_name,
+      target_mod_name: target_mod.module_name,
+      target_pkg_name: target_mod.package_name,
+      type_map: dict.new(),
+      ctor_map: dict.new(),
+      to_public_fns: set.new(),
+      from_public_fns: set.new(),
+      fn_map: dict.new(),
+      const_map: dict.new(),
+      const_fn_map: dict.new(),
+    )
+  list.fold(decls, init, fn(mm, decl) {
+    let local_mangled = mangle.mangle_ident(decl.local_name)
+    let local_ty_mangled = mangle.mangle_type_name(decl.local_name)
+    case decl.kind {
+      MirrorType(target_name) | MirrorOpaque(target_name) -> {
+        let target_ir_name = case find_ir_type(target_mod, target_name) {
+          Some(td) -> td.name
+          None ->
+            case find_ir_alias(target_mod, target_name) {
+              Some(ta) -> ta.name
+              None -> mangle.mangle_type_name(target_name)
+            }
+        }
+        let next_type_map =
+          mm.type_map
+          |> dict.insert(decl.local_name, target_ir_name)
+          |> dict.insert(local_ty_mangled, target_ir_name)
+        let next_ctor_map = case find_ir_type(target_mod, target_name) {
+          Some(td) ->
+            list.fold(td.variants, mm.ctor_map, fn(cm, v) {
+              dict.insert(cm, v.name, v.name)
+            })
+          None -> mm.ctor_map
+        }
+        MirrorMap(..mm, type_map: next_type_map, ctor_map: next_ctor_map)
+      }
+      MirrorToPublic(_) ->
+        MirrorMap(
+          ..mm,
+          to_public_fns: mm.to_public_fns
+            |> set.insert(decl.local_name)
+            |> set.insert(local_mangled),
+        )
+      MirrorFromPublic(_) ->
+        MirrorMap(
+          ..mm,
+          from_public_fns: mm.from_public_fns
+            |> set.insert(decl.local_name)
+            |> set.insert(local_mangled),
+        )
+      MirrorFn(target_name) -> {
+        let tgt_fn_name = case find_ir_fn(target_mod, target_name) {
+          Some(tf) -> tf.name
+          None -> mangle.mangle_ident(target_name)
+        }
+        MirrorMap(
+          ..mm,
+          fn_map: mm.fn_map
+            |> dict.insert(decl.local_name, tgt_fn_name)
+            |> dict.insert(local_mangled, tgt_fn_name),
+        )
+      }
+      MirrorConst(target_name) -> {
+        let tgt_const_name = case find_ir_const(target_mod, target_name) {
+          Some(tc) -> tc.name
+          None -> mangle.mangle_ident(target_name)
+        }
+        case find_ir_const(mirror_mod, decl.local_name) {
+          Some(_) ->
+            MirrorMap(
+              ..mm,
+              const_map: mm.const_map
+                |> dict.insert(decl.local_name, tgt_const_name)
+                |> dict.insert(local_mangled, tgt_const_name),
+            )
+          None ->
+            MirrorMap(
+              ..mm,
+              const_fn_map: mm.const_fn_map
+                |> dict.insert(decl.local_name, tgt_const_name)
+                |> dict.insert(local_mangled, tgt_const_name),
+            )
+        }
+      }
+    }
+  })
+}
+
+fn normalize_mirror_type(
+  ty: IrType,
+  cur_mod: String,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> IrType {
+  let single = dict.from_list([#(mm.mirror_mod_name, mm)])
+  let pm =
+    PatchMaps(
+      mirrors_by_mod: single,
+      type_patch_map: dict.new(),
+      type_patch_ctor_map: dict.new(),
+      mods_by_name: dict.new(),
+    )
+  normalize_type_for_patch(ty, cur_mod, mm.target_mod_name, all_aliases, pm)
+}
+
+fn validate_mirror_decls(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  info: PatchMirrorInfo,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> Result(Nil, String) {
+  list.try_each(info.decls, fn(decl) {
+    case decl.kind {
+      MirrorType(target_name) ->
+        validate_mirror_type_decl(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_name,
+          False,
+          mm,
+          all_aliases,
+        )
+      MirrorOpaque(target_name) ->
+        validate_mirror_type_decl(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_name,
+          True,
+          mm,
+          all_aliases,
+        )
+      MirrorToPublic(target_type) ->
+        validate_mirror_bridge_fn(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_type,
+          True,
+          mm,
+          all_aliases,
+        )
+      MirrorFromPublic(target_type) ->
+        validate_mirror_bridge_fn(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_type,
+          False,
+          mm,
+          all_aliases,
+        )
+      MirrorFn(target_name) ->
+        validate_mirror_fn_decl(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_name,
+          mm,
+          all_aliases,
+        )
+      MirrorConst(target_name) ->
+        validate_mirror_const_decl(
+          mirror_mod,
+          target_mod,
+          decl,
+          target_name,
+          mm,
+          all_aliases,
+        )
+    }
+  })
+}
+
+fn validate_mirror_type_decl(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  decl: MirrorDeclEntry,
+  target_name: String,
+  require_opaque: Bool,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> Result(Nil, String) {
+  case
+    find_ir_type(mirror_mod, decl.local_name),
+    find_ir_type(target_mod, target_name)
+  {
+    Some(mtd), Some(ttd) -> {
+      use _ <- result.try(case require_opaque && !ttd.opaque_ {
+        True ->
+          Error(mirror_drift_error(
+            mirror_mod.module_name,
+            decl,
+            "'" <> target_name <> "' is no longer opaque",
+          ))
+        False -> Ok(Nil)
+      })
+      use _ <- result.try(
+        case list.length(mtd.type_params) == list.length(ttd.type_params) {
+          True -> Ok(Nil)
+          False ->
+            Error(mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "type parameter count changed on '" <> target_name <> "'",
+            ))
+        },
+      )
+      use _ <- result.try(
+        case list.length(mtd.variants) == list.length(ttd.variants) {
+          True -> Ok(Nil)
+          False ->
+            Error(mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "variant count changed on '" <> target_name <> "'",
+            ))
+        },
+      )
+      let param_pairs = list.zip(mtd.type_params, ttd.type_params)
+      let init_bij =
+        list.fold(
+          param_pairs,
+          TypeBijection(dict.new(), dict.new()),
+          fn(b, pair) {
+            TypeBijection(
+              s_to_t: dict.insert(b.s_to_t, pair.0, pair.1),
+              t_to_s: dict.insert(b.t_to_s, pair.1, pair.0),
+            )
+          },
+        )
+      list.zip(mtd.variants, ttd.variants)
+      |> list.try_each(fn(v_pair) {
+        let #(mv, tv) = v_pair
+        use _ <- result.try(case mv.name == tv.name {
+          True -> Ok(Nil)
+          False ->
+            Error(mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "variant '" <> mv.name <> "' does not match '" <> tv.name <> "'",
+            ))
+        })
+        use _ <- result.try(
+          case list.length(mv.fields) == list.length(tv.fields) {
+            True -> Ok(Nil)
+            False ->
+              Error(mirror_drift_error(
+                mirror_mod.module_name,
+                decl,
+                "field count changed on variant '" <> tv.name <> "'",
+              ))
+          },
+        )
+        list.zip(mv.fields, tv.fields)
+        |> list.try_each(fn(f_pair) {
+          let #(mf, tf) = f_pair
+          use _ <- result.try(case mf.unmangled_label == tf.unmangled_label {
+            True -> Ok(Nil)
+            False ->
+              Error(mirror_drift_error(
+                mirror_mod.module_name,
+                decl,
+                "field label changed on variant '" <> tv.name <> "'",
+              ))
+          })
+          let nm =
+            normalize_mirror_type(
+              mf.field_type,
+              mirror_mod.module_name,
+              mm,
+              all_aliases,
+            )
+          let nt =
+            normalize_mirror_type(
+              tf.field_type,
+              target_mod.module_name,
+              mm,
+              all_aliases,
+            )
+          unify_sig_types(nm, nt, init_bij)
+          |> result.map(fn(_) { Nil })
+          |> result.map_error(fn(_) {
+            mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "field type changed on variant '" <> tv.name <> "'",
+            )
+          })
+        })
+      })
+    }
+    _, _ ->
+      case
+        !require_opaque,
+        find_ir_alias(mirror_mod, decl.local_name),
+        find_ir_alias(target_mod, target_name)
+      {
+        True, Some(mta), Some(tta) -> {
+          use _ <- result.try(
+            case list.length(mta.type_params) == list.length(tta.type_params) {
+              True -> Ok(Nil)
+              False ->
+                Error(mirror_drift_error(
+                  mirror_mod.module_name,
+                  decl,
+                  "type parameter count changed on alias '"
+                    <> target_name
+                    <> "'",
+                ))
+            },
+          )
+          let init_bij =
+            list.zip(mta.type_params, tta.type_params)
+            |> list.fold(TypeBijection(dict.new(), dict.new()), fn(b, pair) {
+              TypeBijection(
+                s_to_t: dict.insert(b.s_to_t, pair.0, pair.1),
+                t_to_s: dict.insert(b.t_to_s, pair.1, pair.0),
+              )
+            })
+          let nm =
+            normalize_mirror_type(
+              mta.aliased,
+              mirror_mod.module_name,
+              mm,
+              all_aliases,
+            )
+          let nt =
+            normalize_mirror_type(
+              tta.aliased,
+              target_mod.module_name,
+              mm,
+              all_aliases,
+            )
+          unify_sig_types(nm, nt, init_bij)
+          |> result.map(fn(_) { Nil })
+          |> result.map_error(fn(_) {
+            mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "aliased type changed on '" <> target_name <> "'",
+            )
+          })
+        }
+        _, _, _ ->
+          Error(mirror_drift_error(
+            mirror_mod.module_name,
+            decl,
+            "type '"
+              <> target_name
+              <> "' is missing or changed kind in '"
+              <> target_mod.module_name
+              <> "'",
+          ))
+      }
+  }
+}
+
+fn validate_mirror_bridge_fn(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  decl: MirrorDeclEntry,
+  target_type: String,
+  is_to_public: Bool,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> Result(Nil, String) {
+  use ttd <- result.try(
+    find_ir_type(target_mod, target_type)
+    |> option.to_result(mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "opaque target type '" <> target_type <> "' not found",
+    )),
+  )
+  use mfn <- result.try(
+    find_ir_fn(mirror_mod, decl.local_name)
+    |> option.to_result(mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "bridge function '" <> decl.local_name <> "' not found",
+    )),
+  )
+  case mfn.params {
+    [p] -> {
+      let np =
+        normalize_mirror_type(
+          p.param_type,
+          mirror_mod.module_name,
+          mm,
+          all_aliases,
+        )
+      let nr =
+        normalize_mirror_type(
+          mfn.return_type,
+          mirror_mod.module_name,
+          mm,
+          all_aliases,
+        )
+      let _ = is_to_public
+      let param_ok = case np {
+        IrTypeNamed(module: m, name: n, args:, ..)
+          if m == target_mod.module_name && n == ttd.name
+        -> list.length(args) == list.length(ttd.type_params)
+        _ -> False
+      }
+      case param_ok {
+        False ->
+          Error(mirror_drift_error(
+            mirror_mod.module_name,
+            decl,
+            "bridge function '"
+              <> decl.local_name
+              <> "' parameter does not match '"
+              <> target_type
+              <> "'",
+          ))
+        True ->
+          unify_sig_types(np, nr, TypeBijection(dict.new(), dict.new()))
+          |> result.map(fn(_) { Nil })
+          |> result.map_error(fn(_) {
+            mirror_drift_error(
+              mirror_mod.module_name,
+              decl,
+              "bridge function '"
+                <> decl.local_name
+                <> "' signature mismatch for '"
+                <> target_type
+                <> "'",
+            )
+          })
+      }
+    }
+    _ ->
+      Error(mirror_drift_error(
+        mirror_mod.module_name,
+        decl,
+        "bridge function '" <> decl.local_name <> "' must take 1 parameter",
+      ))
+  }
+}
+
+fn validate_mirror_fn_decl(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  decl: MirrorDeclEntry,
+  target_name: String,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> Result(Nil, String) {
+  use mfn <- result.try(
+    find_ir_fn(mirror_mod, decl.local_name)
+    |> option.to_result(mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "mirror function '" <> decl.local_name <> "' not found",
+    )),
+  )
+  use tfn <- result.try(
+    find_ir_fn(target_mod, target_name)
+    |> option.to_result(mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "private function '"
+        <> target_name
+        <> "' no longer exists in '"
+        <> target_mod.module_name
+        <> "'",
+    )),
+  )
+  use _ <- result.try(case list.length(mfn.params) == list.length(tfn.params) {
+    True -> Ok(Nil)
+    False ->
+      Error(mirror_drift_error(
+        mirror_mod.module_name,
+        decl,
+        "arity changed on '" <> target_name <> "'",
+      ))
+  })
+  let init_bij = TypeBijection(dict.new(), dict.new())
+  use bij_after_params <- result.try(
+    list.zip(mfn.params, tfn.params)
+    |> list.try_fold(init_bij, fn(cur_bij, pair) {
+      let #(mp, tp) = pair
+      use _ <- result.try(case mp.label == tp.label {
+        True -> Ok(Nil)
+        False ->
+          Error(mirror_drift_error(
+            mirror_mod.module_name,
+            decl,
+            "parameter label changed on '" <> target_name <> "'",
+          ))
+      })
+      let nm =
+        normalize_mirror_type(
+          mp.param_type,
+          mirror_mod.module_name,
+          mm,
+          all_aliases,
+        )
+      let nt =
+        normalize_mirror_type(
+          tp.param_type,
+          target_mod.module_name,
+          mm,
+          all_aliases,
+        )
+      unify_sig_types(nm, nt, cur_bij)
+      |> result.map_error(fn(_) {
+        mirror_drift_error(
+          mirror_mod.module_name,
+          decl,
+          "parameter type changed on '" <> target_name <> "'",
+        )
+      })
+    }),
+  )
+  let nm_ret =
+    normalize_mirror_type(
+      mfn.return_type,
+      mirror_mod.module_name,
+      mm,
+      all_aliases,
+    )
+  let nt_ret =
+    normalize_mirror_type(
+      tfn.return_type,
+      target_mod.module_name,
+      mm,
+      all_aliases,
+    )
+  unify_sig_types(nm_ret, nt_ret, bij_after_params)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(_) {
+    mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "return type changed on '" <> target_name <> "'",
+    )
+  })
+}
+
+fn validate_mirror_const_decl(
+  mirror_mod: IrModule,
+  target_mod: IrModule,
+  decl: MirrorDeclEntry,
+  target_name: String,
+  mm: MirrorMap,
+  all_aliases: Dict(#(String, String), IrTypeAlias),
+) -> Result(Nil, String) {
+  use tconst <- result.try(
+    find_ir_const(target_mod, target_name)
+    |> option.to_result(mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "private constant '"
+        <> target_name
+        <> "' no longer exists in '"
+        <> target_mod.module_name
+        <> "'",
+    )),
+  )
+  let mirror_ty_res = case find_ir_const(mirror_mod, decl.local_name) {
+    Some(mc) -> Ok(mc.value_type)
+    None ->
+      case find_ir_fn(mirror_mod, decl.local_name) {
+        Some(mfn) if mfn.params == [] -> Ok(mfn.return_type)
+        _ ->
+          Error(mirror_drift_error(
+            mirror_mod.module_name,
+            decl,
+            "mirror constant '" <> decl.local_name <> "' not found",
+          ))
+      }
+  }
+  use m_ty <- result.try(mirror_ty_res)
+  let nm = normalize_mirror_type(m_ty, mirror_mod.module_name, mm, all_aliases)
+  let nt =
+    normalize_mirror_type(
+      tconst.value_type,
+      target_mod.module_name,
+      mm,
+      all_aliases,
+    )
+  unify_sig_types(nm, nt, TypeBijection(dict.new(), dict.new()))
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(fn(_) {
+    mirror_drift_error(
+      mirror_mod.module_name,
+      decl,
+      "constant type changed on '" <> target_name <> "'",
+    )
+  })
+}
+
+// -----------------------------------------------------------------------------
+// Phase 2: Collect and splice @patch_type definitions
+// -----------------------------------------------------------------------------
+
+type TypePatchSourceDef {
+  SourceTypeDef(IrTypeDef)
+  SourceTypeAlias(IrTypeAlias)
+}
+
+type ResolvedTypePatch {
+  ResolvedTypePatch(
+    key: String,
+    source_mod: IrModule,
+    source_def: TypePatchSourceDef,
+    target_mod_name: String,
+    target_td: IrTypeDef,
+  )
+}
+
+fn split_type_patch_key(key: String) -> #(String, String) {
+  case string.split(key, ".") |> list.reverse {
+    [ty_name, ..rev_rest] if rev_rest != [] -> #(
+      rev_rest |> list.reverse |> string.join("."),
+      ty_name,
+    )
+    _ -> #(key, "")
+  }
+}
+
+fn splice_all_type_patches(
+  ir_modules: List(IrModule),
+  table: SymbolTable,
+  gleam_type_patches: Dict(String, GleamTypePatch),
+  mirrors_by_mod: Dict(String, MirrorMap),
+  mods_by_name: Dict(String, IrModule),
+  module_pkg_by_name: Dict(String, String),
+) -> Result(
+  #(
+    List(IrModule),
+    SymbolTable,
+    Dict(#(String, String), #(String, String, String)),
+    Dict(#(String, String), #(String, String)),
+    SplicedTracker,
+  ),
+  String,
+) {
+  let empty_tracker = SplicedTracker(set.new(), set.new(), set.new())
+  case dict.is_empty(gleam_type_patches) {
+    True -> Ok(#(ir_modules, table, dict.new(), dict.new(), empty_tracker))
+    False -> {
+      use #(resolved_list, type_patch_map, type_ctor_map, tracker0) <- result.try(
+        dict.to_list(gleam_type_patches)
+        |> list.try_fold(
+          #([], dict.new(), dict.new(), empty_tracker),
+          fn(acc, entry) {
+            let #(r_acc, t_map, c_map, tr) = acc
+            let #(key, patch) = entry
+            let #(mod_spec, target_ty_name) = split_type_patch_key(key)
+            use target_mod <- result.try(
+              list.find(ir_modules, fn(m) {
+                let pkg =
+                  dict.get(module_pkg_by_name, m.module_name)
+                  |> result.unwrap("")
+                m.module_name == mod_spec
+                || { pkg != "" && pkg <> ":" <> m.module_name == mod_spec }
+              })
+              |> result.map_error(fn(_) {
+                "Gleam @patch_type target module for '"
+                <> key
+                <> "' was not found"
+              }),
+            )
+            use target_td <- result.try(
+              list.find(target_mod.types, fn(td) {
+                td.unmangled_name == target_ty_name
+              })
+              |> result.map_error(fn(_) {
+                "Gleam @patch_type target '"
+                <> key
+                <> "' was not found as a custom type in '"
+                <> target_mod.module_name
+                <> "'"
+              }),
+            )
+            use _ <- result.try(case target_td.variants == [] {
+              True -> Ok(Nil)
+              False ->
+                Error(
+                  "Gleam @patch_type can only patch zero-variant external types, but '"
+                  <> key
+                  <> "' has variants",
+                )
+            })
+            use source_mod <- result.try(
+              dict.get(mods_by_name, patch.source_module)
+              |> result.map_error(fn(_) {
+                "Gleam @patch_type source module '"
+                <> patch.source_module
+                <> "' for '"
+                <> key
+                <> "' was not found"
+              }),
+            )
+            use source_def <- result.try(
+              case find_ir_type(source_mod, patch.source_type) {
+                Some(sd) -> Ok(SourceTypeDef(sd))
+                None ->
+                  case find_ir_alias(source_mod, patch.source_type) {
+                    Some(sa) -> Ok(SourceTypeAlias(sa))
+                    None ->
+                      Error(
+                        "Gleam @patch_type definition '"
+                        <> patch.source_module
+                        <> "."
+                        <> patch.source_type
+                        <> "' was not found",
+                      )
+                  }
+              },
+            )
+            let next_t_map =
+              t_map
+              |> dict.insert(#(patch.source_module, patch.source_type), #(
+                target_mod.module_name,
+                target_td.name,
+                target_mod.package_name,
+              ))
+              |> dict.insert(
+                #(
+                  patch.source_module,
+                  mangle.mangle_type_name(patch.source_type),
+                ),
+                #(
+                  target_mod.module_name,
+                  target_td.name,
+                  target_mod.package_name,
+                ),
+              )
+            let #(next_c_map, next_tr) = case source_def {
+              SourceTypeDef(sd) -> {
+                let cm =
+                  list.fold(sd.variants, c_map, fn(m, v) {
+                    dict.insert(m, #(patch.source_module, v.name), #(
+                      target_mod.module_name,
+                      v.name,
+                    ))
+                  })
+                let tr2 =
+                  SplicedTracker(
+                    ..tr,
+                    spliced_type_defs: set.insert(tr.spliced_type_defs, #(
+                      patch.source_module,
+                      sd.name,
+                    )),
+                  )
+                #(cm, tr2)
+              }
+              SourceTypeAlias(sa) -> {
+                let tr2 =
+                  SplicedTracker(
+                    ..tr,
+                    spliced_type_aliases: set.insert(tr.spliced_type_aliases, #(
+                      patch.source_module,
+                      sa.name,
+                    )),
+                  )
+                #(c_map, tr2)
+              }
+            }
+            let rp =
+              ResolvedTypePatch(
+                key:,
+                source_mod:,
+                source_def:,
+                target_mod_name: target_mod.module_name,
+                target_td:,
+              )
+            Ok(#([rp, ..r_acc], next_t_map, next_c_map, next_tr))
+          },
+        ),
+      )
+
+      let patch_maps =
+        PatchMaps(
+          mirrors_by_mod:,
+          type_patch_map:,
+          type_patch_ctor_map: type_ctor_map,
+          mods_by_name:,
+        )
+      let indices =
+        dict.map_values(mods_by_name, fn(_k, m) { build_mod_index(m) })
+      let by_target =
+        list.fold(list.reverse(resolved_list), dict.new(), fn(acc, rp) {
+          let existing = dict.get(acc, rp.target_mod_name) |> result.unwrap([])
+          dict.insert(acc, rp.target_mod_name, [rp, ..existing])
+        })
+
+      use #(rev_mods, next_table) <- result.try(
+        list.try_fold(ir_modules, #([], table), fn(acc, mod) {
+          let #(mods_acc, cur_table) = acc
+          case dict.get(by_target, mod.module_name) {
+            Error(_) -> Ok(#([mod, ..mods_acc], cur_table))
+            Ok(rps) -> {
+              use #(updated_mod, updated_table) <- result.try(
+                apply_type_patches_to_module(
+                  mod,
+                  list.reverse(rps),
+                  indices,
+                  patch_maps,
+                  cur_table,
+                ),
+              )
+              Ok(#([updated_mod, ..mods_acc], updated_table))
+            }
+          }
+        }),
+      )
+      Ok(#(
+        list.reverse(rev_mods),
+        next_table,
+        type_patch_map,
+        type_ctor_map,
+        tracker0,
+      ))
+    }
+  }
+}
+
+fn apply_type_patches_to_module(
+  target_mod: IrModule,
+  patches: List(ResolvedTypePatch),
+  indices: Dict(String, ModIndex),
+  patch_maps: PatchMaps,
+  table: symbol_table.SymbolTable,
+) -> Result(#(IrModule, symbol_table.SymbolTable), String) {
+  list.try_fold(patches, #(target_mod, table), fn(acc, rp) {
+    let #(cur_mod, cur_table) = acc
+    let src_idx =
+      dict.get(indices, rp.source_mod.module_name)
+      |> result.unwrap(build_mod_index(rp.source_mod))
+    let src_imports_target =
+      rp.source_mod.module_name != cur_mod.module_name
+      && list.any(rp.source_mod.imports, fn(imp) {
+        imp.module == cur_mod.module_name
+      })
+
+    case rp.source_def {
+      SourceTypeAlias(sa) -> {
+        use _ <- result.try(
+          case
+            list.length(sa.type_params) == list.length(rp.target_td.type_params)
+          {
+            True -> Ok(Nil)
+            False ->
+              Error(
+                "Gleam @patch_type type parameter count mismatch on '"
+                <> rp.key
+                <> "'",
+              )
+          },
+        )
+        use _ <- result.try(case src_imports_target {
+          False -> Ok(Nil)
+          True ->
+            check_local_type_in_type(
+              sa.aliased,
+              rp.source_mod.module_name,
+              src_idx,
+              cur_mod.module_name,
+              patch_maps,
+            )
+        })
+        case detect_direct_external_alias(sa, patch_maps.mods_by_name) {
+          Some(ext) -> {
+            let new_types =
+              list.map(cur_mod.types, fn(td) {
+                case td.name == rp.target_td.name {
+                  True -> IrTypeDef(..td, external_type: Some(ext))
+                  False -> td
+                }
+              })
+            let updated_table =
+              update_table_type_external(
+                cur_table,
+                cur_mod.module_name,
+                rp.target_td.unmangled_name,
+                Some(ext),
+              )
+            Ok(#(IrModule(..cur_mod, types: new_types), updated_table))
+          }
+          None -> {
+            let rewritten_aliased =
+              rewrite_ir_type(
+                sa.aliased,
+                rp.source_mod,
+                cur_mod.module_name,
+                patch_maps,
+              )
+            let new_types =
+              list.filter(cur_mod.types, fn(td) { td.name != rp.target_td.name })
+            let new_alias =
+              IrTypeAlias(
+                name: rp.target_td.name,
+                publicity: rp.target_td.publicity,
+                type_params: sa.type_params,
+                aliased: rewritten_aliased,
+              )
+            let new_aliases = list.append(cur_mod.type_aliases, [new_alias])
+            Ok(#(
+              IrModule(..cur_mod, types: new_types, type_aliases: new_aliases),
+              cur_table,
+            ))
+          }
+        }
+      }
+      SourceTypeDef(sd) -> {
+        use _ <- result.try(
+          case
+            list.length(sd.type_params) == list.length(rp.target_td.type_params)
+          {
+            True -> Ok(Nil)
+            False ->
+              Error(
+                "Gleam @patch_type type parameter count mismatch on '"
+                <> rp.key
+                <> "'",
+              )
+          },
+        )
+        let other_ctors =
+          list.fold(cur_mod.types, set.new(), fn(s, td) {
+            case td.name == rp.target_td.name {
+              True -> s
+              False ->
+                list.fold(td.variants, s, fn(inner, v) {
+                  set.insert(inner, v.name)
+                })
+            }
+          })
+        use _ <- result.try(
+          list.try_each(sd.variants, fn(v) {
+            use _ <- result.try(case set.contains(other_ctors, v.name) {
+              True ->
+                Error(
+                  "Gleam @patch_type constructor '"
+                  <> v.name
+                  <> "' for '"
+                  <> rp.key
+                  <> "' collides with an existing constructor in '"
+                  <> cur_mod.module_name
+                  <> "'",
+                )
+              False -> Ok(Nil)
+            })
+            list.try_each(v.fields, fn(fld) {
+              case src_imports_target {
+                False -> Ok(Nil)
+                True ->
+                  check_local_type_in_type(
+                    fld.field_type,
+                    rp.source_mod.module_name,
+                    src_idx,
+                    cur_mod.module_name,
+                    patch_maps,
+                  )
+              }
+            })
+          }),
+        )
+        let rewritten_variants =
+          list.map(sd.variants, fn(v) {
+            IrVariant(
+              name: v.name,
+              fields: list.map(v.fields, fn(fld) {
+                IrVariantField(
+                  label: fld.label,
+                  unmangled_label: fld.unmangled_label,
+                  field_type: rewrite_ir_type(
+                    fld.field_type,
+                    rp.source_mod,
+                    cur_mod.module_name,
+                    patch_maps,
+                  ),
+                )
+              }),
+            )
+          })
+        let spliced_td =
+          IrTypeDef(
+            name: rp.target_td.name,
+            unmangled_name: rp.target_td.unmangled_name,
+            publicity: rp.target_td.publicity,
+            opaque_: rp.target_td.opaque_,
+            type_params: sd.type_params,
+            variants: rewritten_variants,
+            external_type: sd.external_type,
+            derive_eq_debug_hash: sd.derive_eq_debug_hash,
+          )
+        let new_types =
+          list.map(cur_mod.types, fn(td) {
+            case td.name == rp.target_td.name {
+              True -> spliced_td
+              False -> td
+            }
+          })
+        let copied_getters =
+          list.filter_map(rp.source_mod.getters, fn(g) {
+            case g.type_name == sd.name {
+              False -> Error(Nil)
+              True ->
+                Ok(IrGetter(
+                  type_name: rp.target_td.name,
+                  type_params: sd.type_params,
+                  publicity: rp.target_td.publicity,
+                  field_name: g.field_name,
+                  return_type: rewrite_ir_type(
+                    g.return_type,
+                    rp.source_mod,
+                    cur_mod.module_name,
+                    patch_maps,
+                  ),
+                  variants: g.variants,
+                ))
+            }
+          })
+        let updated_table =
+          copy_table_type_def(
+            cur_table,
+            rp.source_mod.module_name,
+            sd,
+            cur_mod.module_name,
+            rp.target_td,
+          )
+        Ok(#(
+          IrModule(
+            ..cur_mod,
+            types: new_types,
+            getters: list.append(cur_mod.getters, copied_getters),
+          ),
+          updated_table,
+        ))
+      }
+    }
+  })
+}
+
+fn detect_direct_external_alias(
+  sa: IrTypeAlias,
+  mods_by_name: Dict(String, IrModule),
+) -> Option(prepass.ExternalType) {
+  case sa.aliased {
+    IrTypeNamed(module:, name:, args:, ..) -> {
+      let expected_vars = list.map(sa.type_params, fn(tp) { IrTypeVar(tp) })
+      case args == expected_vars {
+        False -> None
+        True ->
+          case dict.get(mods_by_name, module) {
+            Error(_) -> None
+            Ok(ext_mod) ->
+              case find_ir_type(ext_mod, name) {
+                Some(td) if td.variants == [] ->
+                  case
+                    list.length(td.type_params) == list.length(sa.type_params)
+                  {
+                    True -> td.external_type
+                    False -> None
+                  }
+                _ -> None
+              }
+          }
+      }
+    }
+    _ -> None
+  }
+}
+
+fn update_table_type_external(
+  table: symbol_table.SymbolTable,
+  mod_name: String,
+  type_unmangled: String,
+  ext: Option(prepass.ExternalType),
+) -> symbol_table.SymbolTable {
+  case dict.get(table.modules, mod_name) {
+    Error(_) -> table
+    Ok(ms) ->
+      case dict.get(ms.types, type_unmangled) {
+        Error(_) -> table
+        Ok(ti) -> {
+          let next_ti = symbol_table.TypeInfo(..ti, external_type: ext)
+          let next_ms =
+            symbol_table.ModuleSymbols(
+              ..ms,
+              types: dict.insert(ms.types, type_unmangled, next_ti),
+            )
+          symbol_table.SymbolTable(
+            ..table,
+            modules: dict.insert(table.modules, mod_name, next_ms),
+          )
+        }
+      }
+  }
+}
+
+fn copy_table_type_def(
+  table: symbol_table.SymbolTable,
+  src_mod: String,
+  src_td: IrTypeDef,
+  tgt_mod: String,
+  tgt_td: IrTypeDef,
+) -> symbol_table.SymbolTable {
+  case dict.get(table.modules, src_mod), dict.get(table.modules, tgt_mod) {
+    Ok(ms_src), Ok(ms_tgt) ->
+      case dict.get(ms_src.types, src_td.unmangled_name) {
+        Error(_) ->
+          update_table_type_external(
+            table,
+            tgt_mod,
+            tgt_td.unmangled_name,
+            src_td.external_type,
+          )
+        Ok(src_ti) -> {
+          let next_ti =
+            symbol_table.TypeInfo(
+              ..src_ti,
+              module: tgt_mod,
+              name: tgt_td.unmangled_name,
+              publicity: tgt_td.publicity,
+              opaque_: tgt_td.opaque_,
+            )
+          let next_ctors =
+            list.fold(src_td.variants, ms_tgt.constructors, fn(c_acc, v) {
+              case dict.get(ms_src.constructors, v.name) {
+                Ok(ci) ->
+                  dict.insert(
+                    c_acc,
+                    v.name,
+                    ConstructorInfo(
+                      ..ci,
+                      module: tgt_mod,
+                      type_name: tgt_td.unmangled_name,
+                    ),
+                  )
+                Error(_) -> c_acc
+              }
+            })
+          let next_ms =
+            symbol_table.ModuleSymbols(
+              ..ms_tgt,
+              types: dict.insert(ms_tgt.types, tgt_td.unmangled_name, next_ti),
+              constructors: next_ctors,
+            )
+          symbol_table.SymbolTable(
+            ..table,
+            modules: dict.insert(table.modules, tgt_mod, next_ms),
+          )
+        }
+      }
+    _, _ -> table
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Phase 4: Reject any remaining references to @patch_mirror modules
+// -----------------------------------------------------------------------------
+
+fn validate_no_stray_mirror_refs(
+  modules: List(IrModule),
+  mirrors: Dict(String, MirrorMap),
+) -> Result(Nil, String) {
+  case dict.is_empty(mirrors) {
+    True -> Ok(Nil)
+    False ->
+      list.try_each(modules, fn(mod) {
+        use _ <- result.try(
+          list.try_each(mod.types, fn(td) {
+            list.try_each(td.variants, fn(v) {
+              list.try_each(v.fields, fn(fld) {
+                check_type_no_mirror(fld.field_type, mod.module_name, mirrors)
+              })
+            })
+          }),
+        )
+        use _ <- result.try(
+          list.try_each(mod.type_aliases, fn(ta) {
+            check_type_no_mirror(ta.aliased, mod.module_name, mirrors)
+          }),
+        )
+        use _ <- result.try(
+          list.try_each(mod.getters, fn(g) {
+            check_type_no_mirror(g.return_type, mod.module_name, mirrors)
+          }),
+        )
+        use _ <- result.try(
+          list.try_each(mod.constants, fn(c) {
+            use _ <- result.try(check_type_no_mirror(
+              c.value_type,
+              mod.module_name,
+              mirrors,
+            ))
+            check_expr_no_mirror(c.value, mod.module_name, mirrors)
+          }),
+        )
+        list.try_each(mod.functions, fn(f) {
+          use _ <- result.try(
+            list.try_each(f.params, fn(p) {
+              check_type_no_mirror(p.param_type, mod.module_name, mirrors)
+            }),
+          )
+          use _ <- result.try(check_type_no_mirror(
+            f.return_type,
+            mod.module_name,
+            mirrors,
+          ))
+          check_stmts_no_mirror(f.body, mod.module_name, mirrors)
+        })
+      })
+  }
+}
+
+fn stray_mirror_error(
+  cur_mod: String,
+  mirror_mod: String,
+  mm: MirrorMap,
+) -> String {
+  "Module '"
+  <> cur_mod
+  <> "' references @patch_mirror module '"
+  <> mirror_mod
+  <> "' outside of a @patch targeting '"
+  <> mm.target_mod_name
+  <> "'"
+}
+
+fn check_type_no_mirror(
+  ty: IrType,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+) -> Result(Nil, String) {
+  case ty {
+    IrTypeList(inner) -> check_type_no_mirror(inner, cur_mod, mirrors)
+    IrTypeResult(ok:, err:) -> {
+      use _ <- result.try(check_type_no_mirror(ok, cur_mod, mirrors))
+      check_type_no_mirror(err, cur_mod, mirrors)
+    }
+    IrTypeTuple(els) ->
+      list.try_each(els, check_type_no_mirror(_, cur_mod, mirrors))
+    IrTypeFn(params:, return:) -> {
+      use _ <- result.try(
+        list.try_each(params, check_type_no_mirror(_, cur_mod, mirrors)),
+      )
+      check_type_no_mirror(return, cur_mod, mirrors)
+    }
+    IrTypeNamed(module:, args:, ..) -> {
+      use _ <- result.try(case dict.get(mirrors, module) {
+        Ok(mm) -> Error(stray_mirror_error(cur_mod, module, mm))
+        Error(_) -> Ok(Nil)
+      })
+      list.try_each(args, check_type_no_mirror(_, cur_mod, mirrors))
+    }
+    _ -> Ok(Nil)
+  }
+}
+
+fn check_stmts_no_mirror(
+  stmts: List(IrStmt),
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+) -> Result(Nil, String) {
+  list.try_each(stmts, fn(stmt) {
+    case stmt {
+      IrStmtLet(pattern:, annotation:, value:) -> {
+        use _ <- result.try(check_pattern_no_mirror(pattern, cur_mod, mirrors))
+        use _ <- result.try(case annotation {
+          Some(t) -> check_type_no_mirror(t, cur_mod, mirrors)
+          None -> Ok(Nil)
+        })
+        check_expr_no_mirror(value, cur_mod, mirrors)
+      }
+      IrStmtGuard(
+        value:,
+        pattern:,
+        guard_condition:,
+        abort_message:,
+        post_bindings:,
+      ) -> {
+        use _ <- result.try(check_expr_no_mirror(value, cur_mod, mirrors))
+        use _ <- result.try(check_pattern_no_mirror(pattern, cur_mod, mirrors))
+        use _ <- result.try(case guard_condition {
+          Some(g) -> check_expr_no_mirror(g, cur_mod, mirrors)
+          None -> Ok(Nil)
+        })
+        use _ <- result.try(case abort_message {
+          Some(m) -> check_expr_no_mirror(m, cur_mod, mirrors)
+          None -> Ok(Nil)
+        })
+        list.try_each(post_bindings, fn(pb) {
+          check_expr_no_mirror(pb.1, cur_mod, mirrors)
+        })
+      }
+      IrStmtAssert(condition:, abort_message:) -> {
+        use _ <- result.try(check_expr_no_mirror(condition, cur_mod, mirrors))
+        case abort_message {
+          Some(m) -> check_expr_no_mirror(m, cur_mod, mirrors)
+          None -> Ok(Nil)
+        }
+      }
+      IrStmtExpr(e) -> check_expr_no_mirror(e, cur_mod, mirrors)
+    }
+  })
+}
+
+fn check_expr_no_mirror(
+  expr: IrExpr,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+) -> Result(Nil, String) {
+  case expr {
+    IrModuleRef(target_module:, ..) ->
+      case dict.get(mirrors, target_module) {
+        Ok(mm) -> Error(stray_mirror_error(cur_mod, target_module, mm))
+        Error(_) -> Ok(Nil)
+      }
+    IrConstructor(target_module: Some(m), ..) ->
+      case dict.get(mirrors, m) {
+        Ok(mm) -> Error(stray_mirror_error(cur_mod, m, mm))
+        Error(_) -> Ok(Nil)
+      }
+    IrTuple(els) | IrContinue(els) ->
+      list.try_each(els, check_expr_no_mirror(_, cur_mod, mirrors))
+    IrTupleIndex(tuple:, ..)
+    | IrNegateInt(tuple)
+    | IrNegateBool(tuple)
+    | IrBreak(tuple)
+    | IrGetterCall(receiver: tuple, ..) ->
+      check_expr_no_mirror(tuple, cur_mod, mirrors)
+    IrList(elements:, tail:) -> {
+      use _ <- result.try(
+        list.try_each(elements, check_expr_no_mirror(_, cur_mod, mirrors)),
+      )
+      case tail {
+        Some(t) -> check_expr_no_mirror(t, cur_mod, mirrors)
+        None -> Ok(Nil)
+      }
+    }
+    IrBitString(segments:) ->
+      list.try_each(segments, fn(seg) {
+        check_expr_no_mirror(seg.0, cur_mod, mirrors)
+      })
+    IrBinOp(left:, right:, ..) -> {
+      use _ <- result.try(check_expr_no_mirror(left, cur_mod, mirrors))
+      check_expr_no_mirror(right, cur_mod, mirrors)
+    }
+    IrCall(function:, args:) -> {
+      use _ <- result.try(check_expr_no_mirror(function, cur_mod, mirrors))
+      list.try_each(args, fn(a) {
+        check_expr_no_mirror(a.value, cur_mod, mirrors)
+      })
+    }
+    IrBlock(stmts) -> check_stmts_no_mirror(stmts, cur_mod, mirrors)
+    IrFn(params:, return_type:, body:) -> {
+      use _ <- result.try(
+        list.try_each(params, fn(p) {
+          case p.param_type {
+            Some(t) -> check_type_no_mirror(t, cur_mod, mirrors)
+            None -> Ok(Nil)
+          }
+        }),
+      )
+      use _ <- result.try(case return_type {
+        Some(r) -> check_type_no_mirror(r, cur_mod, mirrors)
+        None -> Ok(Nil)
+      })
+      check_stmts_no_mirror(body, cur_mod, mirrors)
+    }
+    IrForLoop(bindings:, body:) -> {
+      use _ <- result.try(
+        list.try_each(bindings, fn(b) {
+          check_expr_no_mirror(b.1, cur_mod, mirrors)
+        }),
+      )
+      check_stmts_no_mirror(body, cur_mod, mirrors)
+    }
+    IrMatch(subjects:, clauses:) -> {
+      use _ <- result.try(
+        list.try_each(subjects, check_expr_no_mirror(_, cur_mod, mirrors)),
+      )
+      list.try_each(clauses, fn(c) {
+        use _ <- result.try(
+          list.try_each(c.patterns, fn(alt) {
+            list.try_each(alt, check_pattern_no_mirror(_, cur_mod, mirrors))
+          }),
+        )
+        use _ <- result.try(case c.guard {
+          Some(g) -> check_expr_no_mirror(g, cur_mod, mirrors)
+          None -> Ok(Nil)
+        })
+        use _ <- result.try(
+          list.try_each(c.prefix_bindings, fn(pb) {
+            check_expr_no_mirror(pb.1, cur_mod, mirrors)
+          }),
+        )
+        check_expr_no_mirror(c.body, cur_mod, mirrors)
+      })
+    }
+    IrEcho(expr: inner, message:, ..) -> {
+      use _ <- result.try(check_expr_no_mirror(inner, cur_mod, mirrors))
+      case message {
+        Some(m) -> check_expr_no_mirror(m, cur_mod, mirrors)
+        None -> Ok(Nil)
+      }
+    }
+    IrAbort(message:, ..) ->
+      case message {
+        Some(m) -> check_expr_no_mirror(m, cur_mod, mirrors)
+        None -> Ok(Nil)
+      }
+    _ -> Ok(Nil)
+  }
+}
+
+fn check_pattern_no_mirror(
+  pat: IrPattern,
+  cur_mod: String,
+  mirrors: Dict(String, MirrorMap),
+) -> Result(Nil, String) {
+  case pat {
+    IrPatTuple(els) ->
+      list.try_each(els, check_pattern_no_mirror(_, cur_mod, mirrors))
+    IrPatAs(inner, _) -> check_pattern_no_mirror(inner, cur_mod, mirrors)
+    IrPatVariant(target_module:, args:, ..) -> {
+      use _ <- result.try(case target_module {
+        Some(m) ->
+          case dict.get(mirrors, m) {
+            Ok(mm) -> Error(stray_mirror_error(cur_mod, m, mm))
+            Error(_) -> Ok(Nil)
+          }
+        None -> Ok(Nil)
+      })
+      list.try_each(args, fn(a) {
+        check_pattern_no_mirror(a.pattern, cur_mod, mirrors)
+      })
+    }
+    IrPatBitString(segments:) ->
+      list.try_each(segments, fn(seg) {
+        check_pattern_no_mirror(seg.0, cur_mod, mirrors)
+      })
+    _ -> Ok(Nil)
   }
 }

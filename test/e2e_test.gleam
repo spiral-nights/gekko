@@ -827,6 +827,10 @@ pub fn cli_parse_args_help_and_version_test() {
     ))
   assert gekko.parse_args(["shim", "migrate"])
     == Ok(gekko.ShimMigrateAction(root: "."))
+  assert gekko.parse_args(["shim", "sync"])
+    == Ok(gekko.ShimSyncAction(root: "."))
+  assert gekko.parse_args(["shim", "sync", "--root", "foo"])
+    == Ok(gekko.ShimSyncAction(root: "foo"))
   assert gekko.parse_args(["shim", "ack"]) == Ok(gekko.ShimAckAction(root: "."))
   assert gekko.parse_args(["shim", "--help"]) == Ok(gekko.HelpAction)
 

@@ -29,8 +29,9 @@ pub fn read_bits(filepath: String) -> Result(BitArray, FileError) {
 
 - **Full Gleam LSP & `gleam check`:** Autocomplete on `FileError` / `FileInfo` and type checking happen directly in Gleam.
 - **Zero circular imports:** Even though your shim imports `simplifile`, `gekko` splices the lowered body (and any private/module helpers it calls) directly into `simplifile`'s transpiled MoonBit package—so `simplifile` never imports your shim module back.
-- **Private & public targets work:** Both `pub fn` and private upstream `fn` externals (like `filepath:filepath.is_windows`) can be patched as long as their parameter/return types are visible in Gleam.
-- **No unused-code warnings:** Private `/// @patch` functions in shim modules are pruned from their defining module after splicing.
+- **Type patching in pure Gleam (`/// @patch_type`):** Zero-variant external types (public or private, such as `TransientDict` or opaque external handles) can be implemented directly in Gleam as aliases (`pub type Handle = ffi.Stat`), pure-Gleam ADTs (`pub type Handle { Handle(id: Int) }`), or bound `gekko moonbit bind` types using `/// @patch_type("pkg:mod.Type")`.
+- **Automatic upstream mirrors (`src/<pkg>/internal/upstream/<mod>.gleam`):** When an upstream module has private types, private helpers/constants, or `pub opaque` types whose constructors/fields a patch needs, `gekko shim` generates a `//// @patch_mirror(...)` mirror module under `internal/upstream/`. Import it `as upstream` to construct/match private or opaque variants (`upstream.Token(...)`), call private helpers, or cross `pub opaque` boundaries with zero-cost `upstream.to_<type>` / `upstream.from_<type>` bridges. `gekko` validates mirrors against upstream IR, erases bridge calls during splicing, and never emits mirror modules to MoonBit.
+- **No unused-code warnings:** Private `/// @patch` functions (and public `@patch` functions referencing mirrors or `@patch_type`s) are pruned from their defining module after splicing.
 
 ### 2. MoonBit Module Patches (`patches/` + `#gekko.patch`) *(Escape hatch)*
 
@@ -205,10 +206,13 @@ gekko shim patch simplifile.FileInfo --moonbit
 # 3. Inspect patch coverage, unmatched entries, missing externals, and type drift
 gekko shim inspect
 
-# 4. Acknowledge reviewed upstream type changes in patches/.gekko_baseline/
+# 4. Regenerate internal/upstream mirror files after upstream upgrades
+gekko shim sync
+
+# 5. Acknowledge reviewed upstream type changes in patches/.gekko_baseline/
 gekko shim ack
 
-# 5. Migrate legacy single-file MoonBit patches & moon.pkg files into gleam.toml
+# 6. Migrate legacy single-file MoonBit patches & moon.pkg files into gleam.toml
 gekko shim migrate
 ```
 

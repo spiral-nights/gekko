@@ -930,3 +930,198 @@ pub fn labeled_args_and_saturated_pipe_eval_order_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn trait_bounds_unify_shared_external_type_aliases_test() {
+  let ext_hashmap =
+    Some(prepass.ExternalType(
+      package: "moonbitlang/core/immut/hashmap",
+      type_name: "HashMap",
+    ))
+  let ffi_hashmap_ty = fn(k, v) {
+    ir.IrTypeNamed(
+      module_alias: Some("mhashmap"),
+      package: "demo",
+      module: "my_ffi/hashmap",
+      name: "HashMap",
+      args: [k, v],
+    )
+  }
+  let dict_ty = fn(k, v) {
+    ir.IrTypeNamed(
+      module_alias: None,
+      package: "demo",
+      module: "my_dict",
+      name: "Dict",
+      args: [k, v],
+    )
+  }
+
+  let ffi_map_mod =
+    ir.IrModule(
+      module_name: "my_ffi/hashmap",
+      package_name: "demo",
+      imports: [],
+      types: [
+        ir.IrTypeDef(
+          name: "HashMap",
+          unmangled_name: "HashMap",
+          publicity: glance.Public,
+          opaque_: False,
+          type_params: ["k", "v"],
+          variants: [],
+          external_type: ext_hashmap,
+          derive_eq_debug_hash: False,
+        ),
+      ],
+      type_aliases: [],
+      getters: [],
+      constants: [],
+      functions: [
+        ir.IrFunction(
+          name: "put",
+          unmangled_name: "put",
+          publicity: glance.Public,
+          type_params: ["T0", "T1"],
+          params: [
+            ir.IrParam(
+              label: None,
+              name: "map",
+              param_type: ffi_hashmap_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+            ),
+            ir.IrParam(label: None, name: "key", param_type: ir.IrTypeVar("T0")),
+            ir.IrParam(
+              label: None,
+              name: "value",
+              param_type: ir.IrTypeVar("T1"),
+            ),
+          ],
+          return_type: ffi_hashmap_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+          ffi: Some(prepass.PackageCall("my_ffi_pkg", "put")),
+          external: True,
+          body: [],
+        ),
+      ],
+    )
+
+  let dict_mod =
+    ir.IrModule(
+      module_name: "my_dict",
+      package_name: "demo",
+      imports: [ir.IrImport(module: "my_ffi/hashmap", alias: Some("mhashmap"))],
+      types: [
+        ir.IrTypeDef(
+          name: "Dict",
+          unmangled_name: "Dict",
+          publicity: glance.Public,
+          opaque_: False,
+          type_params: ["k", "v"],
+          variants: [],
+          external_type: ext_hashmap,
+          derive_eq_debug_hash: False,
+        ),
+      ],
+      type_aliases: [],
+      getters: [],
+      constants: [],
+      functions: [
+        ir.IrFunction(
+          name: "fold",
+          unmangled_name: "fold",
+          publicity: glance.Public,
+          type_params: ["T0", "T1", "T2"],
+          params: [
+            ir.IrParam(
+              label: None,
+              name: "d",
+              param_type: ffi_hashmap_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+            ),
+            ir.IrParam(
+              label: None,
+              name: "init",
+              param_type: ir.IrTypeVar("T2"),
+            ),
+            ir.IrParam(
+              label: None,
+              name: "fun",
+              param_type: ir.IrTypeFn(
+                [ir.IrTypeVar("T2"), ir.IrTypeVar("T0"), ir.IrTypeVar("T1")],
+                ir.IrTypeVar("T2"),
+              ),
+            ),
+          ],
+          return_type: ir.IrTypeVar("T2"),
+          ffi: Some(prepass.PackageCall("my_ffi_pkg", "fold")),
+          external: True,
+          body: [],
+        ),
+        ir.IrFunction(
+          name: "combine",
+          unmangled_name: "combine",
+          publicity: glance.Public,
+          type_params: ["T0", "T1"],
+          params: [
+            ir.IrParam(
+              label: None,
+              name: "d",
+              param_type: dict_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+            ),
+            ir.IrParam(
+              label: None,
+              name: "acc",
+              param_type: dict_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+            ),
+          ],
+          return_type: dict_ty(ir.IrTypeVar("T0"), ir.IrTypeVar("T1")),
+          ffi: None,
+          external: False,
+          body: [
+            ir.IrStmtExpr(
+              ir.IrCall(function: ir.IrVar("fold"), args: [
+                ir.IrCallArg(label: None, value: ir.IrVar("d")),
+                ir.IrCallArg(label: None, value: ir.IrVar("acc")),
+                ir.IrCallArg(
+                  label: None,
+                  value: ir.IrFn(
+                    params: [
+                      ir.IrFnParam("a", None),
+                      ir.IrFnParam("key", None),
+                      ir.IrFnParam("val", None),
+                    ],
+                    return_type: None,
+                    body: [
+                      ir.IrStmtExpr(
+                        ir.IrCall(
+                          function: ir.IrModuleRef(
+                            module_alias: Some("mhashmap"),
+                            target_module: "my_ffi/hashmap",
+                            symbol: "put",
+                          ),
+                          args: [
+                            ir.IrCallArg(label: None, value: ir.IrVar("a")),
+                            ir.IrCallArg(label: None, value: ir.IrVar("key")),
+                            ir.IrCallArg(label: None, value: ir.IrVar("val")),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ]),
+            ),
+          ],
+        ),
+      ],
+    )
+
+  let meta =
+    ffi_meta.scan_mbt_source(
+      ffi_meta.base_metadata(),
+      "my_ffi_pkg",
+      "///|\npub fn[K : Eq + Hash, V] put(\n  map : @hashmap.HashMap[K, V],\n  key : K,\n  value : V,\n) -> @hashmap.HashMap[K, V] {\n  map.add(key, value)\n}\n\n///|\npub fn[K, V, Acc] fold(\n  map : @hashmap.HashMap[K, V],\n  init : Acc,\n  fun : (Acc, K, V) -> Acc,\n) -> Acc {\n  map.fold(init~, fun)\n}\n",
+    )
+
+  let bounds = trait_bounds.analyze_project([ffi_map_mod, dict_mod], None, meta)
+  let combine_bounds =
+    trait_bounds.lookup_fn_bounds(bounds, "my_dict", "combine")
+  assert set.contains(combine_bounds.eq_vars, "T0")
+}

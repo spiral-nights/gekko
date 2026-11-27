@@ -11,13 +11,13 @@ This guide walks through the five ways to build with `gekko`—from pure-Gleam a
 | **Write a Gleam app** using existing shims (`gleam_stdlib`, `gleam_json`) | `[tools.gekko.use_shims]` in `gleam.toml` | `gleam.toml`, `src/` |
 | **Call an existing MoonBit library** from Gleam | `moonbit/moon.mod` + `gekko moonbit bind <pkg>` | `moonbit/moon.mod`, `src/ffi/`, `moonbit/<pkg>_adapter/` |
 | **Write custom MoonBit FFI** for your own project | `moonbit/<pkg>/` + `/// @external(moonbit, ...)` | `moonbit/<pkg>/`, `src/` |
-| **Shim an unmodified Hex package** that has Erlang/JS externals | `[tools.gekko.shim_for]` + `patches/` + `#gekko.patch` | `gleam.toml`, `patches/<mod>/` |
+| **Shim an unmodified Hex package** that has Erlang/JS externals | `[tools.gekko.shim_for]` + `/// @patch` / `/// @patch_type` + `internal/upstream/` *(or `patches/` escape hatch)* | `gleam.toml`, `src/<pkg>/` *(or `patches/<mod>/`)* |
 | **Build a WebAssembly Component** (WASI Preview 2 / WIT host I/O) | `wit/*.wit` + `gekko wit gen` / `check` / `build` | `wit/`, `src/` |
 
 > [!TIP]
 > **Common Confusions Cleared Up**
-> 1. **`moonbit/` vs `patches/`:**
->    Put *your own* standalone MoonBit FFI packages in `moonbit/<pkg>/`. Put *overlays for unmodified upstream Hex packages* in `patches/<mod>/` inside a companion shim package.
+> 1. **`moonbit/` vs `src/<pkg>/` shims vs `patches/`:**
+>    Put *your own* standalone MoonBit FFI packages (or generated `gekko moonbit bind` adapters) in `moonbit/<pkg>/`. Put *Gleam shims* (`/// @patch`, `/// @patch_type`) for unmodified upstream Hex packages in `src/<pkg>/`, with auto-generated mirrors in `src/<pkg>/internal/upstream/`. Reserve `patches/<mod>/` (`#gekko.patch`) for the rare raw-MoonBit escape hatch.
 > 2. **`[tools.gekko.use_shims]` vs `[tools.gekko.shim_for]`:**
 >    - Applications **enable** shims in their root `gleam.toml` with `[tools.gekko.use_shims]` (`gleam_stdlib = "gekko_stdlib"`).
 >    - Companion shim packages **declare which upstream package they patch** in their own `gleam.toml` with `[tools.gekko.shim_for]` (`package = "gleam_stdlib"`).
@@ -238,9 +238,9 @@ gekko shim new simplifile --out ../gekko_simplifile
 
 Inside a companion shim repo (which declares `[tools.gekko.shim_for] package = "simplifile"` in `gleam.toml`), `gekko shim init` and `gekko shim patch` write `/// @patch("simplifile.fn")` stubs directly into `src/<shim_name>/`.
 
-*(Pass `--moonbit` to `new`, `init`, or `patch` when you need low-level MoonBit `patches/` files—for example to define zero-variant external types, custom MoonBit traits like `Hash`/`Eq`, or opaque type constructors.)*
+*(Pass `--moonbit` to `new`, `init`, or `patch` only when you need low-level MoonBit `patches/` files—for example custom MoonBit trait `impl`s, replacing variant-bearing ADTs, or tight mutable loops.)*
 
-### Step 3: Implement `/// @patch(...)` Functions in Gleam
+### Step 3: Implement `/// @patch(...)` and `/// @patch_type(...)` in Gleam
 
 ```gleam
 // src/my_app/shims/simplifile.gleam
@@ -256,7 +256,11 @@ pub fn read_bits(filepath: String) -> Result(BitArray, FileError) {
 }
 ```
 
-When transpiling, `gekko` checks that each `/// @patch(...)` signature matches the upstream function and splices the lowered body directly into the upstream module's MoonBit package—avoiding circular package imports while keeping `gleam check` green.
+- **Zero-variant external types (`/// @patch_type`):** Implement upstream zero-variant types (public or private, e.g. `TransientDict` or external handles) in pure Gleam using an alias (`pub type Handle = ffi.Stat`) or a Gleam custom type (`pub type Handle { Handle(id: Int) }`) annotated with `/// @patch_type("pkg:mod.Type")`.
+- **Private types, helpers & `pub opaque` internals (`internal/upstream/`):** When an upstream module contains private types, private functions/constants, or `pub opaque` types with constructors, `gekko shim` generates a `//// @patch_mirror(...)` mirror at `src/<pkg>/internal/upstream/<mod>.gleam`. Import it `as upstream` to match/construct private or opaque variants (`upstream.Token(...)`), call private helpers, or cross into upstream public functions with zero-cost `upstream.to_<type>` / `upstream.from_<type>` bridges.
+- **Syncing mirrors:** If an upstream upgrade changes mirrored private or opaque declarations, `gekko` reports a clear drift error; run `gekko shim sync` to regenerate the `internal/upstream/` mirrors in place.
+
+When transpiling, `gekko` checks that each `/// @patch(...)` signature matches the upstream function, validates mirrors against upstream IR, erases `to_`/`from_` bridges and mirror modules completely, and splices lowered bodies directly into the upstream module's MoonBit package—avoiding circular package imports while keeping `gleam check` green.
 
 If you need raw MoonBit overrides (`patches/<mod>/<file>.mbt` + `#gekko.patch`), see **[`docs/SHIMS.md`](./SHIMS.md)**.
 

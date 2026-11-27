@@ -655,8 +655,12 @@ pub fn unify_ir_types(
   ctx: AnalyzeCtx,
   subst: Dict(String, IrType),
 ) -> Dict(String, IrType) {
-  let pat_exp = expand_type_alias(pattern_ty, cur_mod, ctx)
-  let con_exp = expand_type_alias(concrete_ty, cur_mod, ctx)
+  let pat_exp =
+    expand_type_alias(pattern_ty, cur_mod, ctx)
+    |> canonicalize_builtin_external(cur_mod, ctx)
+  let con_exp =
+    expand_type_alias(concrete_ty, cur_mod, ctx)
+    |> canonicalize_builtin_external(cur_mod, ctx)
   case pat_exp, con_exp {
     IrTypeVar(v), _ ->
       case is_free_var(v) {
@@ -666,9 +670,9 @@ pub fn unify_ir_types(
             IrTypeVar(cv) ->
               case is_free_var(cv) {
                 True -> subst
-                False -> insert_or_merge_subst(subst, v, con_exp)
+                False -> insert_or_merge_subst(subst, v, con_exp, cur_mod, ctx)
               }
-            _ -> insert_or_merge_subst(subst, v, con_exp)
+            _ -> insert_or_merge_subst(subst, v, con_exp, cur_mod, ctx)
           }
       }
     IrTypeList(p_in), IrTypeList(c_in) ->
@@ -694,12 +698,81 @@ pub fn unify_ir_types(
     }
     IrTypeNamed(module: pm, name: pn, args: pas, ..),
       IrTypeNamed(module: cm, name: cn, args: cas, ..)
-      if pm == cm && pn == cn
     ->
-      list.fold(list.zip(pas, cas), subst, fn(s, pair) {
-        unify_ir_types(pair.0, pair.1, cur_mod, ctx, s)
-      })
+      case same_named_type(pm, pn, cm, cn, cur_mod, ctx) {
+        True ->
+          list.fold(list.zip(pas, cas), subst, fn(s, pair) {
+            unify_ir_types(pair.0, pair.1, cur_mod, ctx, s)
+          })
+        False -> subst
+      }
     _, _ -> subst
+  }
+}
+
+fn normalize_ext_pkg(pkg: String) -> String {
+  case pkg {
+    "" | "builtin" -> "moonbitlang/core/builtin"
+    other -> other
+  }
+}
+
+fn same_named_type(
+  pm: String,
+  pn: String,
+  cm: String,
+  cn: String,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
+) -> Bool {
+  let res_pm = case pm {
+    "" -> cur_mod
+    m -> m
+  }
+  let res_cm = case cm {
+    "" -> cur_mod
+    m -> m
+  }
+  case res_pm == res_cm && pn == cn {
+    True -> True
+    False ->
+      case
+        lookup_external_type(res_pm, pn, ctx),
+        lookup_external_type(res_cm, cn, ctx)
+      {
+        Some(ext1), Some(ext2) ->
+          normalize_ext_pkg(ext1.package) == normalize_ext_pkg(ext2.package)
+          && ext1.type_name == ext2.type_name
+        _, _ -> False
+      }
+  }
+}
+
+fn canonicalize_builtin_external(
+  ty: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
+) -> IrType {
+  case ty {
+    IrTypeNamed(module:, name:, args: [], ..) -> {
+      let res_mod = case module {
+        "" -> cur_mod
+        m -> m
+      }
+      case lookup_external_type(res_mod, name, ctx) {
+        Some(ext) ->
+          case normalize_ext_pkg(ext.package), ext.type_name {
+            "moonbitlang/core/builtin", "String" -> IrTypeString
+            "moonbitlang/core/builtin", "Int64" -> IrTypeInt64
+            "moonbitlang/core/builtin", "Double" -> IrTypeDouble
+            "moonbitlang/core/builtin", "Bool" -> IrTypeBool
+            "moonbitlang/core/builtin", "Unit" -> IrTypeUnit
+            _, _ -> ty
+          }
+        None -> ty
+      }
+    }
+    _ -> ty
   }
 }
 
@@ -714,14 +787,22 @@ fn insert_or_merge_subst(
   subst: Dict(String, IrType),
   key: String,
   val: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
 ) -> Dict(String, IrType) {
   case dict.get(subst, key) {
-    Ok(existing) -> dict.insert(subst, key, merge_bound_type(existing, val))
+    Ok(existing) ->
+      dict.insert(subst, key, merge_bound_type(existing, val, cur_mod, ctx))
     Error(_) -> dict.insert(subst, key, val)
   }
 }
 
-fn merge_bound_type(existing: IrType, new: IrType) -> IrType {
+fn merge_bound_type(
+  existing: IrType,
+  new: IrType,
+  cur_mod: String,
+  ctx: AnalyzeCtx,
+) -> IrType {
   case existing, new {
     IrTypeVar(v), _ ->
       case is_free_var(v) {
@@ -729,14 +810,19 @@ fn merge_bound_type(existing: IrType, new: IrType) -> IrType {
         False -> existing
       }
     IrTypeList(e_in), IrTypeList(n_in) ->
-      IrTypeList(merge_bound_type(e_in, n_in))
+      IrTypeList(merge_bound_type(e_in, n_in, cur_mod, ctx))
     IrTypeResult(eo, ee), IrTypeResult(no, ne) ->
-      IrTypeResult(merge_bound_type(eo, no), merge_bound_type(ee, ne))
+      IrTypeResult(
+        merge_bound_type(eo, no, cur_mod, ctx),
+        merge_bound_type(ee, ne, cur_mod, ctx),
+      )
     IrTypeTuple(es), IrTypeTuple(ns) ->
       case list.length(es) == list.length(ns) {
         True ->
           IrTypeTuple(
-            list.map(list.zip(es, ns), fn(p) { merge_bound_type(p.0, p.1) }),
+            list.map(list.zip(es, ns), fn(p) {
+              merge_bound_type(p.0, p.1, cur_mod, ctx)
+            }),
           )
         False -> existing
       }
@@ -744,23 +830,28 @@ fn merge_bound_type(existing: IrType, new: IrType) -> IrType {
       case list.length(ep) == list.length(np) {
         True ->
           IrTypeFn(
-            list.map(list.zip(ep, np), fn(p) { merge_bound_type(p.0, p.1) }),
-            merge_bound_type(er, nr),
+            list.map(list.zip(ep, np), fn(p) {
+              merge_bound_type(p.0, p.1, cur_mod, ctx)
+            }),
+            merge_bound_type(er, nr, cur_mod, ctx),
           )
         False -> existing
       }
     IrTypeNamed(module: em, name: en, args: eas, ..),
       IrTypeNamed(module: nm, name: nn, args: nas, ..)
-      if em == nm && en == nn
     ->
-      case list.length(eas) == list.length(nas) {
+      case same_named_type(em, en, nm, nn, cur_mod, ctx) {
         True ->
-          IrTypeNamed(
-            ..existing,
-            args: list.map(list.zip(eas, nas), fn(p) {
-              merge_bound_type(p.0, p.1)
-            }),
-          )
+          case list.length(eas) == list.length(nas) {
+            True ->
+              IrTypeNamed(
+                ..existing,
+                args: list.map(list.zip(eas, nas), fn(p) {
+                  merge_bound_type(p.0, p.1, cur_mod, ctx)
+                }),
+              )
+            False -> existing
+          }
         False -> existing
       }
     _, _ -> existing

@@ -94,6 +94,7 @@ pub type CliAction {
   ShimInspectAction(root: String, package: Option(String))
   ShimPatchDeclAction(root: String, target: String, moonbit: Bool)
   ShimPatchModuleAction(root: String, module: String, moonbit: Bool)
+  ShimSyncAction(root: String)
   ShimMigrateAction(root: String)
   ShimAckAction(root: String)
   HelpAction
@@ -210,6 +211,10 @@ pub fn main() -> Nil {
     Ok(ShimPatchModuleAction(root:, module:, moonbit:)) -> {
       require_tools_or_halt(["gleam"])
       run_shim_patch_module(root, module, moonbit)
+    }
+    Ok(ShimSyncAction(root:)) -> {
+      require_tools_or_halt(["gleam"])
+      run_shim_sync(root)
     }
     Ok(ShimMigrateAction(root:)) -> {
       run_shim_migrate(root)
@@ -1232,6 +1237,16 @@ fn run_shim_patch_module(root: String, module: String, moonbit: Bool) -> Nil {
   }
 }
 
+fn run_shim_sync(root: String) -> Nil {
+  case shim_cli.sync_shims(root) {
+    Error(err) -> {
+      io.println_error("gekko shim sync error: " <> err)
+      halt(1)
+    }
+    Ok(msg) -> io.println(msg)
+  }
+}
+
 fn run_shim_migrate(root: String) -> Nil {
   case shim_cli.migrate_shims(root) {
     Error(err) -> {
@@ -1405,6 +1420,10 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
         }
         ["shim", "patch", ..rest] ->
           parse_shim_patch_flags(rest, ".", None, None, False)
+        ["shim", "sync", ..rest] -> {
+          use root <- result.try(parse_shim_root_only_flags(rest, ".", "sync"))
+          Ok(ShimSyncAction(root:))
+        }
         ["shim", "migrate", ..rest] -> {
           use root <- result.try(parse_shim_root_only_flags(
             rest,
@@ -1419,7 +1438,7 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
         }
         ["shim", ..] ->
           Error(
-            "Expected `gekko shim <new|init|inspect|patch|migrate|ack> [flags]`",
+            "Expected `gekko shim <new|init|inspect|patch|sync|migrate|ack> [flags]`",
           )
         [unknown, ..] -> Error("Unknown subcommand: " <> unknown)
       }
@@ -1771,6 +1790,7 @@ fn print_usage() -> Nil {
     "  gekko shim inspect [<pkg>] [--root <dir>]",
     "  gekko shim patch   <module>.<decl> [--root <dir>] [--moonbit]",
     "  gekko shim patch   --module <module> [--root <dir>] [--moonbit]",
+    "  gekko shim sync    [--root <dir>]",
     "  gekko shim migrate [--root <dir>]",
     "  gekko shim ack     [--root <dir>]",
     "  gekko --version | -V",

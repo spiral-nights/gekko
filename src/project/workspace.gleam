@@ -186,8 +186,11 @@ pub fn transpile_project_with_tests(
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
 
+  let non_mirror_modules =
+    list.filter(all_modules, fn(entry) { entry.3.patch_mirror == None })
+
   let resolved_pkg_dirs =
-    all_modules
+    non_mirror_modules
     |> list.map(fn(entry) { entry.1 })
     |> pkg_config.resolve_module_pkg_dirs
 
@@ -221,7 +224,7 @@ pub fn transpile_project_with_tests(
   ))
 
   let module_pkg_dirs =
-    list.map(all_modules, fn(entry) {
+    list.map(non_mirror_modules, fn(entry) {
       dict.get(resolved_pkg_dirs, entry.1)
       |> result.unwrap(pkg_config.module_to_pkg_dir(entry.1))
     })
@@ -271,21 +274,34 @@ pub fn transpile_project_with_tests(
       |> tco.optimize_module
     })
 
-  use ir_modules <- result.try(gleam_patch.splice_gleam_patches(
-    ir_modules,
-    table,
-  ))
-
-  let project_bounds =
-    trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
-
-  let module_meta_by_name =
+  let patch_mirrors =
     list.fold(all_modules, dict.new(), fn(acc, entry) {
+      let #(_, mod_name, _, pre) = entry
+      case pre.patch_mirror {
+        Some(info) -> dict.insert(acc, mod_name, info)
+        None -> acc
+      }
+    })
+  let module_meta_by_name =
+    list.fold(non_mirror_modules, dict.new(), fn(acc, entry) {
       let #(pkg_name, mod_name, ast_mod, pre) = entry
       dict.insert(acc, mod_name, #(pkg_name, ast_mod, pre.cleaned_source))
     })
   let module_pkg_by_name =
     dict.map_values(module_meta_by_name, fn(_k, v) { v.0 })
+
+  use #(ir_modules, table) <- result.try(
+    gleam_patch.splice_gleam_patches_with_overlays(
+      ir_modules,
+      table,
+      overlays.gleam_type_patches,
+      patch_mirrors,
+      module_pkg_by_name,
+    ),
+  )
+
+  let project_bounds =
+    trait_bounds.analyze_project(ir_modules, Some(table), ffi_metadata)
 
   use _ <- result.try(validate_patch_decl_sigs(
     ir_modules,
@@ -985,6 +1001,14 @@ fn validate_overlay_matches(
       "type_override",
       "type",
     )
+  let e_g_tys =
+    check_keys(
+      dict.keys(overlays.gleam_type_patches),
+      overlays.gleam_type_patch_sources,
+      type_keys,
+      "gleam_type_patch",
+      "type",
+    )
   let e_mods =
     check_keys(
       dict.keys(overlays.module_patches),
@@ -993,7 +1017,40 @@ fn validate_overlay_matches(
       "patch",
       "module",
     )
-  case list.flatten([e_fns, e_tys, e_mods]) {
+  let e_mirrors =
+    dict.to_list(overlays.patch_mirrors)
+    |> list.filter_map(fn(entry) {
+      let #(mirror_mod, target_mod_key) = entry
+      case set.contains(mod_keys, target_mod_key) {
+        True -> Error(Nil)
+        False -> {
+          let targets_missing_pkg = case
+            string.split_once(target_mod_key, ":")
+          {
+            Ok(#(pkg, _)) -> set.contains(missing_shim_targets, pkg)
+            Error(_) -> False
+          }
+          case targets_missing_pkg {
+            True -> Error(Nil)
+            False -> {
+              let src =
+                dict.get(overlays.patch_mirror_sources, mirror_mod)
+                |> result.unwrap("root")
+              Ok(
+                "Unmatched patch_mirror '"
+                <> target_mod_key
+                <> "' in '"
+                <> mirror_mod
+                <> "' (from "
+                <> src
+                <> ") did not match any module in loaded packages",
+              )
+            }
+          }
+        }
+      }
+    })
+  case list.flatten([e_fns, e_tys, e_g_tys, e_mods, e_mirrors]) {
     [] -> Ok(Nil)
     errs -> Error(string.join(errs, "\n"))
   }

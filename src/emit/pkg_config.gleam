@@ -125,7 +125,7 @@ pub fn emit_moon_mod_with_deps(
 }
 
 /// Generate a declarative `moon.pkg` file for a package given `#(pkg_or_dir, alias)`
-/// pairs and an optional `is-main` entrypoint flag.
+/// pairs and an optional executable entrypoint flag.
 pub fn emit_moon_pkg(
   project_name: String,
   imports: List(#(String, String)),
@@ -164,7 +164,7 @@ pub fn emit_moon_pkg_with_local_pkgs(
         "" -> ""
         _ -> "\n"
       }
-      prefix <> "options(\n  \"is-main\": true,\n)\n"
+      prefix <> "pkgtype(kind: \"executable\")\n"
     }
   }
 

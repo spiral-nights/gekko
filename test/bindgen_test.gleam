@@ -548,7 +548,11 @@ pub fn moonbit_bindgen_stdlib_buffer_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -662,7 +666,11 @@ pub fn moonbit_bindgen_local_pkg_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -1260,7 +1268,11 @@ pub fn moonbit_bindgen_gprelude_and_builtin_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -1348,7 +1360,7 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
     <> "  assert mhm.get(hm, \"a\") == Some(10)\n"
     <> "  let total = mhm.fold(hm, 0, fn(acc, _k, v) { acc + v })\n"
     <> "  assert total == 30\n"
-    <> "  let assert Ok(j) = mjson.parse(\"\\\"hi\\\"\", None, None, None)\n"
+    <> "  let assert Ok(j) = mjson.parse(\"\\\"hi\\\"\", None, None)\n"
     <> "  let s = mjson.match_json(\n"
     <> "    j,\n"
     <> "    fn() { \"null\" },\n"
@@ -1360,7 +1372,7 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
     <> "    fn(_) { \"obj\" },\n"
     <> "  )\n"
     <> "  assert s == \"hi\"\n"
-    <> "  let assert Error(err) = mjson.parse(\"{\", None, None, None)\n"
+    <> "  let assert Error(err) = mjson.parse(\"{\", None, None)\n"
     <> "  let err_tag = mjson.match_parse_error(\n"
     <> "    err,\n"
     <> "    fn(_, _) { \"char\" },\n"
@@ -1384,7 +1396,11 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
   let assert Ok(_) = workspace.transpile_project(root, out_dir)
 
   let check_moon =
-    cmd.run(command: "moon", args: ["check", "--target", "wasm"], cwd: out_dir)
+    cmd.run(
+      command: "moon",
+      args: ["check", "--deny-warn", "--target", "wasm"],
+      cwd: out_dir,
+    )
   assert check_moon.exit_code == 0
 
   let run_wasm =
@@ -1400,4 +1416,34 @@ pub fn moonbit_bindgen_json_and_hashmap_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   let _ = simplifile.delete(file_or_dir_at: info_dir)
   Nil
+}
+
+pub fn mbti_label_migration_fill_false_test() {
+  let src =
+    "package \"demo/mod\"\n\n"
+    <> "#label_migration(max_nesting_depth, fill=false)\n"
+    <> "pub fn parse(StringView, max_nesting_depth? : Int32, reject_duplicate_keys? : Bool) -> Int\n\n"
+    <> "#label_migration(len, fill=false, msg=\"Use slice\")\n"
+    <> "pub fn copy(len? : Int32, dst : String) -> Unit\n\n"
+    <> "#label_migration(capacity, alias=size_hint, msg=\"Use capacity= instead\")\n"
+    <> "pub fn make(capacity? : Int32) -> Unit\n"
+
+  let assert Ok(pkg) = mbti.parse_mbti(src)
+  assert list.length(pkg.functions) == 3
+
+  let assert [parse_fn, copy_fn, make_fn] = pkg.functions
+  assert parse_fn.name == "parse"
+  assert list.length(parse_fn.params) == 2
+  let assert [_, p2] = parse_fn.params
+  assert p2.label == Some("reject_duplicate_keys")
+
+  assert copy_fn.name == "copy"
+  assert list.length(copy_fn.params) == 1
+  let assert [cp1] = copy_fn.params
+  assert cp1.label == Some("dst")
+
+  assert make_fn.name == "make"
+  assert list.length(make_fn.params) == 1
+  let assert [mp1] = make_fn.params
+  assert mp1.label == Some("capacity")
 }

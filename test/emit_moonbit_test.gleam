@@ -51,7 +51,7 @@ pub fn pkg_config_generation_test() {
   assert string.contains(pkg_str, "\"demo/gprelude\" @gprelude,")
   assert string.contains(pkg_str, "\"demo/demo_math\" @math,")
   assert string.contains(pkg_str, "\"my_org/wit_fs\" @my_org_wit_fs,")
-  assert string.contains(pkg_str, "\"is-main\": true")
+  assert string.contains(pkg_str, "pkgtype(kind: \"executable\")")
 }
 
 pub fn emit_moonbit_ffi_and_constructs_test() {

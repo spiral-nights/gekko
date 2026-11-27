@@ -1,6 +1,7 @@
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 import moonbit/syntax
 
@@ -103,7 +104,7 @@ pub fn parse_mbti(source: String) -> Result(MbtiPackage, String) {
       types: [],
       functions: [],
     )
-  use pkg <- result.try(parse_lines(lines, False, pkg0))
+  use pkg <- result.try(parse_lines(lines, False, set.new(), pkg0))
   case pkg.package_name {
     "" -> Error("Missing `package \"...\"` header in .mbti file")
     _ ->
@@ -120,6 +121,7 @@ pub fn parse_mbti(source: String) -> Result(MbtiPackage, String) {
 fn parse_lines(
   lines: List(String),
   pending_deprecated: Bool,
+  pending_omitted_labels: Set(String),
   acc: MbtiPackage,
 ) -> Result(MbtiPackage, String) {
   case lines {
@@ -127,22 +129,64 @@ fn parse_lines(
     [line, ..rest] -> {
       let trimmed = string.trim(line)
       case trimmed {
-        "" -> parse_lines(rest, False, acc)
+        "" -> parse_lines(rest, False, set.new(), acc)
         _ ->
           case string.starts_with(trimmed, "//") {
-            True -> parse_lines(rest, False, acc)
+            True -> parse_lines(rest, False, set.new(), acc)
             False ->
               case string.starts_with(trimmed, "#") {
                 True -> {
                   let next_dep =
                     pending_deprecated
                     || string.starts_with(trimmed, "#deprecated")
-                  parse_lines(rest, next_dep, acc)
+                  let next_omitted = case
+                    parse_label_migration_fill_false(trimmed)
+                  {
+                    Some(lbl) -> set.insert(pending_omitted_labels, lbl)
+                    None -> pending_omitted_labels
+                  }
+                  parse_lines(rest, next_dep, next_omitted, acc)
                 }
                 False ->
-                  parse_declaration_line(trimmed, rest, pending_deprecated, acc)
+                  parse_declaration_line(
+                    trimmed,
+                    rest,
+                    pending_deprecated,
+                    pending_omitted_labels,
+                    acc,
+                  )
               }
           }
+      }
+    }
+  }
+}
+
+fn parse_label_migration_fill_false(attr: String) -> Option(String) {
+  case string.starts_with(attr, "#label_migration(") {
+    False -> None
+    True -> {
+      let after_prefix = string.drop_start(attr, 16)
+      case syntax.take_balanced_parens(after_prefix) {
+        Ok(#(inner, _)) -> {
+          let parts =
+            syntax.split_top_level_commas(inner)
+            |> list.map(string.trim)
+          case parts {
+            [param_label, ..opts] if param_label != "" -> {
+              let has_fill_false =
+                list.any(opts, fn(opt) {
+                  string.replace(opt, " ", "") == "fill=false"
+                })
+              case has_fill_false {
+                True -> Some(param_label)
+                False -> None
+              }
+            }
+            _ -> None
+          }
+        }
+        Error(_) -> None
       }
     }
   }
@@ -152,6 +196,7 @@ fn parse_declaration_line(
   trimmed: String,
   rest: List(String),
   pending_deprecated: Bool,
+  pending_omitted_labels: Set(String),
   acc: MbtiPackage,
 ) -> Result(MbtiPackage, String) {
   case string.starts_with(trimmed, "package \"") {
@@ -161,20 +206,25 @@ fn parse_declaration_line(
         Ok(#(pkg, _)) -> pkg
         Error(_) -> ""
       }
-      parse_lines(rest, False, MbtiPackage(..acc, package_name: name))
+      parse_lines(
+        rest,
+        False,
+        set.new(),
+        MbtiPackage(..acc, package_name: name),
+      )
     }
     False ->
       case string.starts_with(trimmed, "import {") {
         True -> {
           let #(block_lines, remaining) = take_until_closing_brace(rest, [])
           let imports = parse_import_block(block_lines)
-          parse_lines(remaining, False, MbtiPackage(..acc, imports:))
+          parse_lines(remaining, False, set.new(), MbtiPackage(..acc, imports:))
         }
         False ->
           case is_ignored_decl(trimmed) {
             True -> {
               let remaining = skip_block_if_open(trimmed, rest)
-              parse_lines(remaining, False, acc)
+              parse_lines(remaining, False, set.new(), acc)
             }
             False ->
               case
@@ -185,10 +235,12 @@ fn parse_declaration_line(
                   use fn_decl <- result.try(parse_fn_decl(
                     trimmed,
                     pending_deprecated,
+                    pending_omitted_labels,
                   ))
                   parse_lines(
                     rest,
                     False,
+                    set.new(),
                     MbtiPackage(..acc, functions: [fn_decl, ..acc.functions]),
                   )
                 }
@@ -205,6 +257,7 @@ fn parse_declaration_line(
                       parse_lines(
                         rest,
                         False,
+                        set.new(),
                         MbtiPackage(..acc, constants: [c, ..acc.constants]),
                       )
                     }
@@ -341,6 +394,7 @@ fn parse_type_declaration(
       parse_lines(
         remaining,
         False,
+        set.new(),
         MbtiPackage(..acc, types: [td, ..acc.types]),
       )
     }
@@ -361,6 +415,7 @@ fn parse_type_declaration(
       parse_lines(
         remaining,
         False,
+        set.new(),
         MbtiPackage(..acc, types: [td, ..acc.types]),
       )
     }
@@ -380,6 +435,7 @@ fn parse_type_declaration(
           parse_lines(
             remaining,
             False,
+            set.new(),
             MbtiPackage(..acc, types: [td, ..acc.types]),
           )
         }
@@ -388,7 +444,12 @@ fn parse_type_declaration(
           let #(name, type_params, _) = split_name_and_type_params(header)
           let td =
             MbtiTypeDecl(name:, type_params:, kind: MbtiOpaque, is_deprecated:)
-          parse_lines(rest, False, MbtiPackage(..acc, types: [td, ..acc.types]))
+          parse_lines(
+            rest,
+            False,
+            set.new(),
+            MbtiPackage(..acc, types: [td, ..acc.types]),
+          )
         }
       }
     }
@@ -406,12 +467,17 @@ fn parse_type_declaration(
         False -> Ok(MbtiOpaque)
       })
       let td = MbtiTypeDecl(name:, type_params:, kind:, is_deprecated:)
-      parse_lines(rest, False, MbtiPackage(..acc, types: [td, ..acc.types]))
+      parse_lines(
+        rest,
+        False,
+        set.new(),
+        MbtiPackage(..acc, types: [td, ..acc.types]),
+      )
     }
 
     _, _, _, _ -> {
       let remaining = skip_block_if_open(trimmed, rest)
-      parse_lines(remaining, False, acc)
+      parse_lines(remaining, False, set.new(), acc)
     }
   }
 }
@@ -544,6 +610,7 @@ fn parse_enum_variant(line: String) -> Result(MbtiVariant, String) {
 fn parse_fn_decl(
   line: String,
   is_deprecated: Bool,
+  omitted_labels: Set(String),
 ) -> Result(MbtiFnDecl, String) {
   let #(is_async, after_kw) = case string.starts_with(line, "pub async fn") {
     True -> #(True, string.trim(string.drop_start(line, 12)))
@@ -566,7 +633,14 @@ fn parse_fn_decl(
   use #(params_src, after_params) <- result.try(syntax.take_balanced_parens(
     "(" <> rest_after_name,
   ))
-  use params <- result.try(parse_fn_params(params_src))
+  use raw_params <- result.try(parse_fn_params(params_src))
+  let params =
+    list.filter(raw_params, fn(p) {
+      case p.is_optional, p.label {
+        True, Some(lbl) -> !set.contains(omitted_labels, lbl)
+        _, _ -> True
+      }
+    })
 
   let after_params = string.trim(after_params)
   use ret_and_eff <- result.try(case string.starts_with(after_params, "->") {

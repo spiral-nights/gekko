@@ -1483,7 +1483,7 @@ pub fn emit_adapter_moon_pkg_with_options(
     })
   let merged = dict.merge(clean_extra, base)
   case dict.is_empty(merged) {
-    True -> ""
+    True -> "warnings = \"-alert_visibility\"\n"
     False -> {
       let entries =
         dict.to_list(merged)
@@ -1491,7 +1491,7 @@ pub fn emit_adapter_moon_pkg_with_options(
         |> list.map(fn(p) { "  \"" <> p.0 <> "\" @" <> p.1 <> "," })
         |> string.join("\n")
 
-      "import {\n" <> entries <> "\n}\n"
+      "import {\n" <> entries <> "\n}\n\nwarnings = \"-alert_visibility\"\n"
     }
   }
 }

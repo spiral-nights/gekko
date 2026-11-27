@@ -16,10 +16,11 @@ gleam test
 For optional full-ecosystem regression verification across `gekko_stdlib`, `gekko_json`, and `gekko_examples`:
 
 ```sh
-./scripts/test_ecosystem.sh
+./scripts/test_ecosystem.sh         # all targets (wasm, wasm-gc, js, native) + examples
+./scripts/test_ecosystem.sh --fast  # single-target (wasm), skip native example builds
 ```
 
-Override repository locations via `GEKKO_STDLIB_DIR`, `GEKKO_JSON_DIR`, and `GEKKO_EXAMPLES_DIR` (or refs via `GEKKO_STDLIB_REF`, `GEKKO_JSON_REF`, `GEKKO_EXAMPLES_REF`); unset variables clone over HTTPS into a temporary directory.
+Use `--no-cache` (or `GEKKO_CACHE_DIR=""`) to bypass the local incremental cache at `build/.ecosystem_cache`, and `TARGETS` / `EXAMPLE_TARGETS` to customize targets. Override repository locations via `GEKKO_STDLIB_DIR`, `GEKKO_JSON_DIR`, and `GEKKO_EXAMPLES_DIR` (or refs via `GEKKO_STDLIB_REF`, `GEKKO_JSON_REF`, `GEKKO_EXAMPLES_REF`); unset variables clone over HTTPS into a temporary directory.
 
 ## Key Conventions & Invariants
 

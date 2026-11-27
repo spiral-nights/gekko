@@ -10,6 +10,7 @@ import gleam/result
 import gleam/string
 import moonbit/bindgen
 import moonbit/bindgen_adapter.{type BindOptions, BindOptions}
+import project/cli_help.{type HelpTopic}
 import project/cmd
 import project/diagnostics
 import project/fs
@@ -97,7 +98,7 @@ pub type CliAction {
   ShimSyncAction(root: String)
   ShimMigrateAction(root: String)
   ShimAckAction(root: String)
-  HelpAction
+  HelpAction(topic: HelpTopic)
   VersionAction
 }
 
@@ -129,10 +130,12 @@ pub fn main() -> Nil {
   case parse_args(args) {
     Error(msg) -> {
       io.println_error("Error: " <> msg)
-      print_usage()
+      io.println_error(
+        "Run 'gekko --help' or 'gekko <command> --help' for usage.",
+      )
       halt(1)
     }
-    Ok(HelpAction) -> print_usage()
+    Ok(HelpAction(topic:)) -> io.println(help_text(topic))
     Ok(VersionAction) -> io.println("gekko " <> version)
     Ok(CheckAction(root:, out:, target:, strict:)) -> {
       require_tools_or_halt(["gleam", "moon"])
@@ -1271,10 +1274,26 @@ pub fn parse_args(args: List(String)) -> Result(CliAction, String) {
   let #(pre_dash, program_args) = split_on_double_dash(args)
   let args = expand_eq_flags(pre_dash)
   case list.any(args, fn(a) { a == "--help" || a == "-h" }) {
-    True -> Ok(HelpAction)
+    True -> {
+      let cleaned = list.filter(args, fn(a) { a != "--help" && a != "-h" })
+      cli_help.resolve_topic(cleaned)
+      |> result.map(HelpAction)
+    }
     False ->
       case args {
-        [] | ["help", ..] -> Ok(HelpAction)
+        [] -> Ok(HelpAction(cli_help.HelpTopLevel))
+        ["help", ..rest] ->
+          cli_help.resolve_topic(rest)
+          |> result.map(HelpAction)
+        ["wit", "help", ..rest] ->
+          cli_help.resolve_topic(["wit", ..rest])
+          |> result.map(HelpAction)
+        ["moonbit", "help", ..rest] ->
+          cli_help.resolve_topic(["moonbit", ..rest])
+          |> result.map(HelpAction)
+        ["shim", "help", ..rest] ->
+          cli_help.resolve_topic(["shim", ..rest])
+          |> result.map(HelpAction)
         ["--version"] | ["-V"] | ["version"] -> Ok(VersionAction)
         ["doctor"] -> Ok(DoctorAction)
         ["new", ..rest] -> parse_new_args(rest, None, False)
@@ -1768,42 +1787,9 @@ fn parse_shim_patch_flags(
   }
 }
 
-fn print_usage() -> Nil {
-  let lines = [
-    "gekko " <> version <> " - Gleam-to-MoonBit & Wasm Component transpiler",
-    "",
-    "Usage:",
-    "  gekko new <name> [--wit]",
-    "  gekko init      [--root <dir>] [--wit]",
-    "  gekko clean     [--root <dir>]",
-    "  gekko doctor",
-    "  gekko check     [--strict] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
-    "  gekko build     [--strict] [--release] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--output <file> | -o <file>] [--work-dir <dir>]",
-    "  gekko test      [--strict] [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>]",
-    "  gekko run       [--target <wasm|wasm-gc|js|native>] [--root <dir>] [--work-dir <dir>] [-- <args>...]",
-    "  gekko wit gen      [--root <dir>] [--wit <dir>] [--world <name>]",
-    "  gekko wit check    [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>]",
-    "  gekko wit build    [--release] [--root <dir>] [--wit <dir>] [--world <name>] [--work-dir <dir>] [--output <file.wasm> | -o <file.wasm>]",
-    "  gekko moonbit bind <pkg> [--root <dir>] [--module <gleam_mod>] [--adapter <pkg>] [--only <item> ...] [--map-type <Mbt=Gleam> ...] [--typed-errors] [--work-dir <dir>]",
-    "  gekko shim new     <pkg> [--root <dir>] [--out <dir> | -o <dir>] [--moonbit]",
-    "  gekko shim init    [--root <dir>] [--moonbit]",
-    "  gekko shim inspect [<pkg>] [--root <dir>]",
-    "  gekko shim patch   <module>.<decl> [--root <dir>] [--moonbit]",
-    "  gekko shim patch   --module <module> [--root <dir>] [--moonbit]",
-    "  gekko shim sync    [--root <dir>]",
-    "  gekko shim migrate [--root <dir>]",
-    "  gekko shim ack     [--root <dir>]",
-    "  gekko --version | -V",
-    "  gekko --help    | -h",
-    "",
-    "Notes:",
-    "  --root defaults to the current working directory (.) for all commands.",
-    "  --out is accepted as a backwards-compatible alias for --work-dir (and -o on build).",
-    "  gekko build writes the compiled artifact into the current directory by",
-    "  default (or to --output / -o), keeping intermediate files in <root>/build/moonbit.",
-    "  gekko shim generates Gleam /// @patch stubs by default; pass --moonbit for patches/*.mbt.",
-  ]
-  list.each(lines, io.println)
+/// Render help text for a CLI help topic using the current `gekko` version.
+pub fn help_text(topic: HelpTopic) -> String {
+  cli_help.render(topic, version)
 }
 
 @external(erlang, "erlang", "halt")

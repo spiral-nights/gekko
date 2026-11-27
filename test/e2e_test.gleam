@@ -4,6 +4,7 @@ import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import project/cli_help
 import project/cmd
 import project/scaffold
 import project/workspace
@@ -603,14 +604,20 @@ pub fn bit_array_tier2_e2e_all_targets_test() {
 }
 
 pub fn cli_parse_args_help_and_version_test() {
-  assert gekko.parse_args([]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["--help"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["-h"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["help"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["check", "--help"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["build", "-h"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["wit", "build", "--help"]) == Ok(gekko.HelpAction)
-  assert gekko.parse_args(["moonbit", "bind", "--help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args([]) == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+  assert gekko.parse_args(["--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+  assert gekko.parse_args(["-h"]) == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+  assert gekko.parse_args(["help"])
+    == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+  assert gekko.parse_args(["check", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpCheck))
+  assert gekko.parse_args(["build", "-h"])
+    == Ok(gekko.HelpAction(cli_help.HelpBuild))
+  assert gekko.parse_args(["wit", "build", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpWitBuild))
+  assert gekko.parse_args(["moonbit", "bind", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpMoonbitBind))
 
   assert gekko.parse_args(["--version"]) == Ok(gekko.VersionAction)
   assert gekko.parse_args(["-V"]) == Ok(gekko.VersionAction)
@@ -832,7 +839,8 @@ pub fn cli_parse_args_help_and_version_test() {
   assert gekko.parse_args(["shim", "sync", "--root", "foo"])
     == Ok(gekko.ShimSyncAction(root: "foo"))
   assert gekko.parse_args(["shim", "ack"]) == Ok(gekko.ShimAckAction(root: "."))
-  assert gekko.parse_args(["shim", "--help"]) == Ok(gekko.HelpAction)
+  assert gekko.parse_args(["shim", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpShim))
 
   // Parse `moon build` artifact lines
   let sample_build_out =
@@ -874,6 +882,122 @@ pub fn cli_parse_args_help_and_version_test() {
       p == "dist"
     })
   assert string.contains(dir_err, "existing directory")
+}
+
+pub fn cli_subcommand_help_test() {
+  // Every top-level command, group, and nested subcommand supports --help, -h, and help
+  let cases = [
+    #([], cli_help.HelpTopLevel),
+    #(["help"], cli_help.HelpTopLevel),
+    #(["version"], cli_help.HelpVersion),
+    #(["new"], cli_help.HelpNew),
+    #(["init"], cli_help.HelpInit),
+    #(["clean"], cli_help.HelpClean),
+    #(["doctor"], cli_help.HelpDoctor),
+    #(["check"], cli_help.HelpCheck),
+    #(["build"], cli_help.HelpBuild),
+    #(["test"], cli_help.HelpTest),
+    #(["run"], cli_help.HelpRun),
+    #(["wit"], cli_help.HelpWit),
+    #(["wit", "gen"], cli_help.HelpWitGen),
+    #(["wit", "check"], cli_help.HelpWitCheck),
+    #(["wit", "build"], cli_help.HelpWitBuild),
+    #(["moonbit"], cli_help.HelpMoonbit),
+    #(["moonbit", "bind"], cli_help.HelpMoonbitBind),
+    #(["shim"], cli_help.HelpShim),
+    #(["shim", "new"], cli_help.HelpShimNew),
+    #(["shim", "init"], cli_help.HelpShimInit),
+    #(["shim", "inspect"], cli_help.HelpShimInspect),
+    #(["shim", "patch"], cli_help.HelpShimPatch),
+    #(["shim", "sync"], cli_help.HelpShimSync),
+    #(["shim", "migrate"], cli_help.HelpShimMigrate),
+    #(["shim", "ack"], cli_help.HelpShimAck),
+  ]
+
+  list.each(cases, fn(entry) {
+    let #(cmd, expected) = entry
+    assert gekko.parse_args(list.append(cmd, ["--help"]))
+      == Ok(gekko.HelpAction(expected))
+    assert gekko.parse_args(list.append(cmd, ["-h"]))
+      == Ok(gekko.HelpAction(expected))
+    assert gekko.parse_args(["help", ..cmd]) == Ok(gekko.HelpAction(expected))
+  })
+
+  // `<group> help [<subcmd>]` syntax and `help help` termination
+  assert gekko.parse_args(["help", "help"])
+    == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+  assert gekko.parse_args(["wit", "help"])
+    == Ok(gekko.HelpAction(cli_help.HelpWit))
+  assert gekko.parse_args(["wit", "help", "help"])
+    == Ok(gekko.HelpAction(cli_help.HelpWit))
+  assert gekko.parse_args(["wit", "help", "gen"])
+    == Ok(gekko.HelpAction(cli_help.HelpWitGen))
+  assert gekko.parse_args(["wit", "help", "check"])
+    == Ok(gekko.HelpAction(cli_help.HelpWitCheck))
+  assert gekko.parse_args(["wit", "help", "build"])
+    == Ok(gekko.HelpAction(cli_help.HelpWitBuild))
+  assert gekko.parse_args(["moonbit", "help"])
+    == Ok(gekko.HelpAction(cli_help.HelpMoonbit))
+  assert gekko.parse_args(["moonbit", "help", "bind"])
+    == Ok(gekko.HelpAction(cli_help.HelpMoonbitBind))
+  assert gekko.parse_args(["shim", "help"])
+    == Ok(gekko.HelpAction(cli_help.HelpShim))
+  assert gekko.parse_args(["shim", "help", "patch"])
+    == Ok(gekko.HelpAction(cli_help.HelpShimPatch))
+
+  // Mixing positional arguments or flags with --help / -h
+  assert gekko.parse_args(["new", "my_app", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpNew))
+  assert gekko.parse_args(["build", "--target", "native", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpBuild))
+  assert gekko.parse_args(["moonbit", "bind", "pkg", "-h"])
+    == Ok(gekko.HelpAction(cli_help.HelpMoonbitBind))
+  assert gekko.parse_args(["shim", "patch", "gleam/dict.get", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpShimPatch))
+  assert gekko.parse_args(["--help", "build"])
+    == Ok(gekko.HelpAction(cli_help.HelpBuild))
+  assert gekko.parse_args(["--version", "--help"])
+    == Ok(gekko.HelpAction(cli_help.HelpTopLevel))
+
+  // `--` still forwards `--help` to the user program in `gekko run`
+  assert gekko.parse_args(["run", "--", "--help"])
+    == Ok(
+      gekko.RunAction(root: ".", out: None, target: None, program_args: [
+        "--help",
+      ]),
+    )
+
+  // Unknown help topics return errors
+  let assert Error(_) = gekko.parse_args(["bogus", "--help"])
+  let assert Error(_) = gekko.parse_args(["help", "bogus"])
+  let assert Error(_) = gekko.parse_args(["wit", "bogus", "--help"])
+  let assert Error(_) = gekko.parse_args(["moonbit", "bogus", "--help"])
+  let assert Error(_) = gekko.parse_args(["shim", "bogus", "--help"])
+
+  // Every topic renders non-empty text with a Usage section
+  let topics = cli_help.all_topics()
+  assert list.length(topics) == 24
+  list.each(topics, fn(topic) {
+    let text = gekko.help_text(topic)
+    assert string.trim(text) != ""
+    assert string.contains(text, "Usage:")
+  })
+
+  // Spot-check command-specific flags in rendered output
+  let build_help = gekko.help_text(cli_help.HelpBuild)
+  assert string.contains(build_help, "--release")
+  assert string.contains(build_help, "--output")
+
+  let bind_help = gekko.help_text(cli_help.HelpMoonbitBind)
+  assert string.contains(bind_help, "--map-type")
+  assert string.contains(bind_help, "--typed-errors")
+
+  let shim_patch_help = gekko.help_text(cli_help.HelpShimPatch)
+  assert string.contains(shim_patch_help, "--module")
+  assert string.contains(shim_patch_help, "--moonbit")
+
+  let run_help = gekko.help_text(cli_help.HelpRun)
+  assert string.contains(run_help, "-- <args>")
 }
 
 pub fn build_outputs_artifact_and_skips_tests_e2e_test() {

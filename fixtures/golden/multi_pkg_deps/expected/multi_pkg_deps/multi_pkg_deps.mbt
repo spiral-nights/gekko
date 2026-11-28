@@ -1,7 +1,7 @@
 ///|
 #derive(Eq, Debug, Hash)
 pub(all) enum User {
-  User(name~ : String, score~ : Int64, nickname~ : Option[String], tags~ : @gprelude.GList[String])
+  User(name~ : StringView, score~ : Int64, nickname~ : Option[StringView], tags~ : @gprelude.GList[StringView])
 }
 
 ///|
@@ -12,14 +12,14 @@ pub impl @gprelude.GleamInspect for User with gleam_inspect(self) {
 }
 
 ///|
-pub fn User::name(self : User) -> String {
+pub fn User::name(self : User) -> StringView {
   match self {
     User(name~, ..) => name
   }
 }
 
 ///|
-pub fn User::nickname(self : User) -> Option[String] {
+pub fn User::nickname(self : User) -> Option[StringView] {
   match self {
     User(nickname~, ..) => nickname
   }
@@ -33,28 +33,28 @@ pub fn User::score(self : User) -> Int64 {
 }
 
 ///|
-pub fn User::tags(self : User) -> @gprelude.GList[String] {
+pub fn User::tags(self : User) -> @gprelude.GList[StringView] {
   match self {
     User(tags~, ..) => tags
   }
 }
 
 ///|
-pub fn format_user(user : User) -> String {
+pub fn format_user(user : User) -> StringView {
   let nick = match user.nickname() {
   Some(n) => n
-  None => "none"
+  None => ("none" : StringView)
 }
-  ((((user.name() + ":") + @text.int_to_string(user.score())) + ":") + nick)
+  ((((user.name() + (":" : StringView)) + @text.int_to_string(user.score())) + (":" : StringView)) + nick)
 }
 
 ///|
-pub fn count_tags(tags : @gprelude.GList[String]) -> @kv.MiniMap[String, Int64] {
+pub fn count_tags(tags : @gprelude.GList[StringView]) -> @kv.MiniMap[StringView, Int64] {
   count_tags_loop(tags, @kv.new())
 }
 
 ///|
-fn count_tags_loop(tags : @gprelude.GList[String], acc : @kv.MiniMap[String, Int64]) -> @kv.MiniMap[String, Int64] {
+fn count_tags_loop(tags : @gprelude.GList[StringView], acc : @kv.MiniMap[StringView, Int64]) -> @kv.MiniMap[StringView, Int64] {
   for tags = tags, acc = acc {
     match tags {
       @gprelude.Nil => break acc
@@ -69,16 +69,16 @@ fn count_tags_loop(tags : @gprelude.GList[String], acc : @kv.MiniMap[String, Int
 }
 
 ///|
-pub fn format_badge(name : String, active : Bool, score : Int64) -> String {
+pub fn format_badge(name : StringView, active : Bool, score : Int64) -> StringView {
   let flag = match active {
-  true => "True"
-  false => "False"
+  true => ("True" : StringView)
+  false => ("False" : StringView)
 }
-  ((((@tiny_slug.slugify(name) + ":") + flag) + ":") + @text.int_to_string(score))
+  ((((@tiny_slug.slugify(name) + (":" : StringView)) + flag) + (":" : StringView)) + @text.int_to_string(score))
 }
 
 ///|
-pub fn check_bytes(input : String) -> Result[String, Unit] {
+pub fn check_bytes(input : StringView) -> Result[StringView, Unit] {
   let bits = @text.to_bits(input)
   match @text.from_bits(bits) {
     Ok(decoded) => @option.to_result(@option.map(Some(decoded), @text.uppercase), ())

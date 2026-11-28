@@ -905,7 +905,7 @@ fn gleam_mbt_type(
       state,
     )
     WitF32 | WitF64 -> #("Double", state)
-    WitChar | WitString -> #("String", state)
+    WitChar | WitString -> #("StringView", state)
     WitList(WitU8) -> #("@gprelude.BitArray", state)
     WitList(inner) -> {
       let #(s, st1) = gleam_mbt_type(inner, owner_key, use_map, state)
@@ -974,13 +974,14 @@ fn conv_w2g_expr(
   state: AdapterState,
 ) -> #(String, AdapterState) {
   case ty {
-    WitBool | WitS64 | WitF64 | WitString -> #(expr, state)
+    WitBool | WitS64 | WitF64 -> #(expr, state)
+    WitString -> #("(" <> expr <> ").to_string_view()", state)
     WitS8 | WitS16 | WitS32 -> #("(" <> expr <> ").to_int64()", state)
     WitU8 -> #("(" <> expr <> ").to_int().to_int64()", state)
     WitU16 | WitU32 -> #("(" <> expr <> ").to_int64()", state)
     WitU64 -> #("(" <> expr <> ").reinterpret_as_int64()", state)
     WitF32 -> #("(" <> expr <> ").to_double()", state)
-    WitChar -> #("String::make(1, " <> expr <> ")", state)
+    WitChar -> #("String::make(1, " <> expr <> ").to_string_view()", state)
     WitList(WitU8) -> #(
       "@gprelude.BitArray::from_bytes(Bytes::from_array((" <> expr <> ")[:]))",
       state,
@@ -1094,7 +1095,8 @@ fn conv_g2w_expr(
   state: AdapterState,
 ) -> #(String, AdapterState) {
   case ty {
-    WitBool | WitS64 | WitF64 | WitString -> #(expr, state)
+    WitBool | WitS64 | WitF64 -> #(expr, state)
+    WitString -> #("(" <> expr <> ").to_owned()", state)
     WitS8 | WitS16 | WitS32 -> #("(" <> expr <> ").to_int()", state)
     WitU8 -> #("(" <> expr <> ").to_byte()", state)
     WitU16 | WitU32 -> #(

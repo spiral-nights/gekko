@@ -912,7 +912,7 @@ pub fn emit_type(ty: IrType, ctx: EmitCtx) -> #(String, EmitCtx) {
   case ty {
     IrTypeInt64 -> #("Int64", ctx)
     IrTypeDouble -> #("Double", ctx)
-    IrTypeString -> #("String", ctx)
+    IrTypeString -> #("StringView", ctx)
     IrTypeBool -> #("Bool", ctx)
     IrTypeUnit -> #("Unit", ctx)
     IrTypeBitArray -> #("@gprelude.BitArray", add_gprelude_import(ctx))

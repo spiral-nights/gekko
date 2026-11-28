@@ -98,7 +98,7 @@ pub fn emit_moonbit_ffi_and_constructs_test() {
   assert string.contains(mbt, "__ffi_host_add(a, b)")
   assert string.contains(
     mbt,
-    "pub fn greet(p : String, n : String) -> String {",
+    "pub fn greet(p : StringView, n : StringView) -> StringView {",
   )
   assert string.contains(mbt, "apply(x, fn(__c_0) { Ok(__c_0) })")
 }
@@ -749,9 +749,10 @@ pub fn gprelude_dynmap_hash_and_charlist_inspect_test() {
     mbt,
     "sum = sum + (Hash::hash(k) * 31 + Hash::hash(v))",
   )
+  assert string.contains(mbt, "\"charlist.from_string(\"")
   assert string.contains(
     mbt,
-    "\"charlist.from_string(\" + escape_gleam_string(char_buf.to_string()) + \")\"",
+    "escape_gleam_string(char_buf.to_string().to_string_view())",
   )
 }
 
@@ -1314,4 +1315,104 @@ pub fn type_param_matching_local_type_name_is_prefixed_test() {
     "pub fn[T_Definition] Definition::value(self : Definition[T_Definition]) -> T_Definition",
   )
   assert !string.contains(mbt, "Definition[Definition]")
+}
+
+pub fn string_prefix_pattern_emits_string_view_test() {
+  let src =
+    "pub fn strip(s: String) -> String {\n"
+    <> "  case s {\n"
+    <> "    \"pre:\" <> rest -> rest\n"
+    <> "    _ -> s\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("str_mod", src)
+  let table =
+    symbol_table.index_project(
+      "str_pkg",
+      [#("str_mod", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "str_mod")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+
+  assert string.contains(mbt, "pub fn strip(s : StringView) -> StringView {")
+  assert string.contains(mbt, "@gprelude.string_has_prefix(")
+  assert string.contains(mbt, "@gprelude.string_drop_prefix(")
+}
+
+pub fn ffi_string_and_string_view_auto_bridging_e2e_test() {
+  let root = "build/test_fixtures/ffi_sv_bridge"
+  let out_dir = "build/test_fixtures/ffi_sv_bridge_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/str_ffi"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"ffi_sv_bridge\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let mbt_pkg = "import {\n  \"ffi_sv_bridge/gprelude\" @gprelude,\n}\n"
+  let mbt_src =
+    "///|\npub fn legacy_upper(s : String) -> String {\n  s.to_upper()\n}\n\n"
+    <> "///|\npub fn legacy_res(x : Result[String, String]) -> Result[String, String] {\n  match x {\n    Ok(s) => Ok(s + \"!\")\n    Err(e) => Err(\"err:\" + e)\n  }\n}\n\n"
+    <> "///|\npub fn legacy_list(xs : @gprelude.GList[String]) -> @gprelude.GList[String] {\n  xs.map(fn(s) { \"[\" + s + \"]\" })\n}\n\n"
+    <> "///|\npub fn fast_slice(s : StringView) -> StringView {\n  s.strip_prefix(\"pre:\").unwrap_or(s)\n}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/str_ffi/moon.pkg"),
+      contents: mbt_pkg,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/str_ffi/str_ffi.mbt"),
+      contents: mbt_src,
+    )
+    == Ok(Nil)
+
+  let gleam_src =
+    "/// @external(moonbit, \"str_ffi\", \"legacy_upper\")\n"
+    <> "pub fn legacy_upper(s: String) -> String {\n  let _ = s\n  panic as \"mbt\"\n}\n\n"
+    <> "/// @external(moonbit, \"str_ffi\", \"legacy_res\")\n"
+    <> "pub fn legacy_res(x: Result(String, String)) -> Result(String, String) {\n  let _ = x\n  panic as \"mbt\"\n}\n\n"
+    <> "/// @external(moonbit, \"str_ffi\", \"legacy_list\")\n"
+    <> "pub fn legacy_list(xs: List(String)) -> List(String) {\n  let _ = xs\n  panic as \"mbt\"\n}\n\n"
+    <> "/// @external(moonbit, \"str_ffi\", \"fast_slice\")\n"
+    <> "pub fn fast_slice(s: String) -> String {\n  let _ = s\n  panic as \"mbt\"\n}\n"
+
+  let test_src =
+    "import ffi_sv_bridge\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn string_and_string_view_ffi_e2e_test() {\n"
+    <> "  assert ffi_sv_bridge.legacy_upper(\"gekko\") == \"GEKKO\"\n"
+    <> "  assert ffi_sv_bridge.legacy_res(Ok(\"hi\")) == Ok(\"hi!\")\n"
+    <> "  assert ffi_sv_bridge.legacy_res(Error(\"no\")) == Error(\"err:no\")\n"
+    <> "  assert ffi_sv_bridge.legacy_list([\"a\", \"b\"]) == [\"[a]\", \"[b]\"]\n"
+    <> "  assert ffi_sv_bridge.fast_slice(\"pre:ok\") == \"ok\"\n"
+    <> "  assert ffi_sv_bridge.fast_slice(\"raw\") == \"raw\"\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/ffi_sv_bridge.gleam"),
+      contents: gleam_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/ffi_sv_bridge_check.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  test_helpers.assert_all_moonbit_targets_ok(out_dir, "passed: 1, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
 }

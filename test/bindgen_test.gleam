@@ -1164,7 +1164,7 @@ pub fn mbti_suberror_and_bindgen_options_unit_test() {
   )
   assert string.contains(
     mbt_src,
-    "@moonbitlang_core_json.Number(v0, repr=v1) => on_number(v0, v1)",
+    "@moonbitlang_core_json.Number(v0, repr=v1) => on_number(v0, (v1).map(fn(x0) { (x0).to_string_view() }))",
   )
   assert string.contains(
     mbt_src,

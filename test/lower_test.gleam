@@ -783,8 +783,14 @@ pub fn bit_array_tier2_lowering_and_emission_test() {
     mbt,
     "@gprelude.BitArray::float_segment(1.5, 64L, true)",
   )
-  assert string.contains(mbt, "@gprelude.BitArray::from_utf16(\"hi\", false)")
-  assert string.contains(mbt, "@gprelude.BitArray::from_utf32(\"yo\", true)")
+  assert string.contains(
+    mbt,
+    "@gprelude.BitArray::from_utf16((\"hi\" : StringView), false)",
+  )
+  assert string.contains(
+    mbt,
+    "@gprelude.BitArray::from_utf32((\"yo\" : StringView), true)",
+  )
   assert string.contains(mbt, "@gprelude.BitArray::utf8_codepoint_segment(cp)")
   assert string.contains(
     mbt,
@@ -983,8 +989,8 @@ pub fn shorthand_fields_and_prelude_shadowing_test() {
   let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
 
   assert string.contains(mbt, "@dep.shared_name")
-  assert string.contains(mbt, "Error(\"custom\")")
-  assert !string.contains(mbt, "Err(\"custom\")")
+  assert string.contains(mbt, "Error((\"custom\" : StringView))")
+  assert !string.contains(mbt, "Err((\"custom\" : StringView))")
 }
 
 pub fn tco_non_tail_let_and_synthetic_pattern_root_test() {

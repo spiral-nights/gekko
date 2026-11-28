@@ -96,6 +96,7 @@ pub fn base_metadata() -> FfiMetadata {
     "Float",
     "Bool",
     "String",
+    "StringView",
     "Bytes",
     "Unit",
     "Char",
@@ -979,11 +980,10 @@ fn parse_fn_header(
       }
     }
   }
-  let has_any_bounds = list.any(tp_list, fn(pair) { !set.is_empty(pair.1) })
+  let _ = list.any(tp_list, fn(pair) { !set.is_empty(pair.1) })
   case
     fn_name != ""
     && !string.contains(fn_name, "::")
-    && has_any_bounds
     && string.starts_with(after_name_and_tps, "(")
   {
     False -> meta

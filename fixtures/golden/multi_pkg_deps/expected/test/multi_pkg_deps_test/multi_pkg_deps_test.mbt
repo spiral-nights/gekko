@@ -1,11 +1,11 @@
 ///|
 pub fn user_record_and_option_test() -> Unit {
-  let u1 = @multi_pkg_deps.User(name="Akira", score=42L, nickname=Some("Aki"), tags=@gprelude.Cons("gleam", @gprelude.Cons("wasm", @gprelude.Nil)))
-  let u2 = @multi_pkg_deps.User(name="Rei", score=7L, nickname=None, tags=@gprelude.Nil)
-  if !((@multi_pkg_deps.format_user(u1) == "Akira:42:Aki")) {
+  let u1 = @multi_pkg_deps.User(name=("Akira" : StringView), score=42L, nickname=Some(("Aki" : StringView)), tags=@gprelude.Cons(("gleam" : StringView), @gprelude.Cons(("wasm" : StringView), @gprelude.Nil)))
+  let u2 = @multi_pkg_deps.User(name=("Rei" : StringView), score=7L, nickname=None, tags=@gprelude.Nil)
+  if !((@multi_pkg_deps.format_user(u1) == ("Akira:42:Aki" : StringView))) {
     @prelude.abort("assertion failed")
   }
-  if !((@multi_pkg_deps.format_user(u2) == "Rei:7:none")) {
+  if !((@multi_pkg_deps.format_user(u2) == ("Rei:7:none" : StringView))) {
     @prelude.abort("assertion failed")
   }
 }
@@ -17,14 +17,14 @@ test "user_record_and_option_test" {
 
 ///|
 pub fn kv_upsert_and_fold_test() -> Unit {
-  let counts = @multi_pkg_deps.count_tags(@gprelude.Cons("a", @gprelude.Cons("b", @gprelude.Cons("a", @gprelude.Cons("c", @gprelude.Cons("a", @gprelude.Nil))))))
-  if !((@kv.get(counts, "a") == Ok(3L))) {
+  let counts = @multi_pkg_deps.count_tags(@gprelude.Cons(("a" : StringView), @gprelude.Cons(("b" : StringView), @gprelude.Cons(("a" : StringView), @gprelude.Cons(("c" : StringView), @gprelude.Cons(("a" : StringView), @gprelude.Nil))))))
+  if !((@kv.get(counts, ("a" : StringView)) == Ok(3L))) {
     @prelude.abort("assertion failed")
   }
-  if !((@kv.get(counts, "b") == Ok(1L))) {
+  if !((@kv.get(counts, ("b" : StringView)) == Ok(1L))) {
     @prelude.abort("assertion failed")
   }
-  if !((@kv.get(counts, "missing") == Err(()))) {
+  if !((@kv.get(counts, ("missing" : StringView)) == Err(()))) {
     @prelude.abort("assertion failed")
   }
   let sum = @kv.fold(counts, 0L, fn(acc : Int64, _, v : Int64) {
@@ -42,10 +42,10 @@ test "kv_upsert_and_fold_test" {
 
 ///|
 pub fn dep_slug_and_bits_test() -> Unit {
-  if !((@multi_pkg_deps.format_badge("  Hello Gleam  ", true, 9L) == "hello-gleam:True:9")) {
+  if !((@multi_pkg_deps.format_badge(("  Hello Gleam  " : StringView), true, 9L) == ("hello-gleam:True:9" : StringView))) {
     @prelude.abort("assertion failed")
   }
-  if !((@multi_pkg_deps.check_bytes("moonbeam") == Ok("MOONBEAM"))) {
+  if !((@multi_pkg_deps.check_bytes(("moonbeam" : StringView)) == Ok(("MOONBEAM" : StringView)))) {
     @prelude.abort("assertion failed")
   }
 }

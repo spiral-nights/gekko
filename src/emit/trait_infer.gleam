@@ -762,7 +762,9 @@ fn canonicalize_builtin_external(
       case lookup_external_type(res_mod, name, ctx) {
         Some(ext) ->
           case normalize_ext_pkg(ext.package), ext.type_name {
-            "moonbitlang/core/builtin", "String" -> IrTypeString
+            "moonbitlang/core/builtin", "String"
+            | "moonbitlang/core/builtin", "StringView"
+            -> IrTypeString
             "moonbitlang/core/builtin", "Int64" -> IrTypeInt64
             "moonbitlang/core/builtin", "Double" -> IrTypeDouble
             "moonbitlang/core/builtin", "Bool" -> IrTypeBool

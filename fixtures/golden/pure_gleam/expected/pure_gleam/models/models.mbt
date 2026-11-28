@@ -1,8 +1,8 @@
 ///|
 #derive(Eq, Debug, Hash)
 pub(all) enum User {
-  Admin(id~ : Int64, name~ : String, level~ : Int64)
-  Guest(id~ : Int64, name~ : String)
+  Admin(id~ : Int64, name~ : StringView, level~ : Int64)
+  Guest(id~ : Int64, name~ : StringView)
 }
 
 ///|
@@ -29,7 +29,7 @@ pub impl @gprelude.GleamInspect for Point with gleam_inspect(self) {
 ///|
 #derive(Eq, Debug, Hash)
 pub(all) enum Box[A] {
-  Box(value~ : A, label~ : String)
+  Box(value~ : A, label~ : StringView)
 }
 
 ///|
@@ -60,7 +60,7 @@ pub fn User::id(self : User) -> Int64 {
 }
 
 ///|
-pub fn User::name(self : User) -> String {
+pub fn User::name(self : User) -> StringView {
   match self {
     Admin(name~, ..) => name
     Guest(name~, ..) => name
@@ -82,7 +82,7 @@ pub fn Point::y(self : Point) -> Double {
 }
 
 ///|
-pub fn[A] Box::label(self : Box[A]) -> String {
+pub fn[A] Box::label(self : Box[A]) -> StringView {
   match self {
     Box(label~, ..) => label
   }
@@ -103,7 +103,7 @@ pub fn Hook::cb(self : Hook) -> (Int64) -> Int64 {
 }
 
 ///|
-pub fn make_admin(id : Int64, name : String) -> User {
+pub fn make_admin(id : Int64, name : StringView) -> User {
   Admin(id=id, name=name, level=1L)
 }
 
@@ -112,7 +112,7 @@ pub fn promote(user : User, new_level : Int64) -> User {
   match user {
     Admin(..) => match user {
       Admin(id=__upd_0_id, name=__upd_0_name, level=_) => Admin(id=__upd_0_id, name=__upd_0_name, level=new_level)
-      _ => @prelude.abort("unreachable record update variant")
+      _ => @prelude.abort((("unreachable record update variant" : StringView)).to_owned())
     }
     Guest(id~, name~) => Admin(id=id, name=name, level=new_level)
   }

@@ -11,9 +11,9 @@ import moonbit/bindgen_adapter.{
   type BindContext, type BindOptions, type EmittedFn, type ResolvedTypeSpec,
   type TypeConv, ArrayConv, ArrayViewConv, BindContext, BytesConv, BytesViewConv,
   CharConv, Direct, EmittedFn, ExternalTypeRef, FixedArrayConv, Float32, FnConv,
-  NarrowByte, NarrowInt16, NarrowInt32, NarrowUInt16, NarrowUInt32, OptionConv,
-  ReinterpretUInt64, ResolvedTypeSpec, ResultConv, StringViewConv, TupleConv,
-  build_adapter_fn, build_external_type_decls, default_bind_options,
+  MapConv, NarrowByte, NarrowInt16, NarrowInt32, NarrowUInt16, NarrowUInt32,
+  OptionConv, ReinterpretUInt64, ResolvedTypeSpec, ResultConv, StringConv,
+  TupleConv, build_adapter_fn, build_external_type_decls, default_bind_options,
   emit_adapter_helpers, emit_adapter_moon_pkg_with_options, format_fn_label,
   generate_const_items, generate_type_helper_items, int_range_names,
   is_builtin_pkg, last_segment_snake, pick_unique_gleam_name, pkg_to_moon_alias,
@@ -1076,7 +1076,8 @@ fn resolve_concrete_named(
   case qualifier, name, args {
     None, "Int64", [] -> simple_spec("Int", "Int64", "Int64", Direct)
     None, "Double", [] -> simple_spec("Float", "Double", "Double", Direct)
-    None, "String", [] -> simple_spec("String", "String", "String", Direct)
+    None, "String", [] ->
+      simple_spec("String", "StringView", "String", StringConv)
     None, "Bool", [] -> simple_spec("Bool", "Bool", "Bool", Direct)
     None, "Unit", [] -> simple_spec("Nil", "Unit", "Unit", Direct)
 
@@ -1117,7 +1118,7 @@ fn resolve_concrete_named(
         extra_pkgs: dict.new(),
       ))
     None, "StringView", [] ->
-      simple_spec("String", "String", "StringView", StringViewConv)
+      simple_spec("String", "StringView", "StringView", Direct)
     None, "Char", [] ->
       case dict.get(bctx.options.map_types, "Char") {
         Ok(#("", ty_name)) -> simple_spec(ty_name, "Char", "Char", Direct)
@@ -1135,7 +1136,7 @@ fn resolve_concrete_named(
             mapped_imports: set.from_list([#(mod_path, ty_name)]),
             extra_pkgs: dict.new(),
           ))
-        Error(_) -> simple_spec("String", "String", "Char", CharConv)
+        Error(_) -> simple_spec("String", "StringView", "Char", CharConv)
       }
     None, "BitArray", [] if bctx.mbti.package_name == "gprelude" ->
       Ok(ResolvedTypeSpec(
@@ -1248,6 +1249,59 @@ fn resolve_concrete_named(
         used_external_types: s.used_external_types,
         mapped_imports: s.mapped_imports,
         extra_pkgs: s.extra_pkgs,
+      ))
+    }
+
+    None, "Map", [k_ty, v_ty] -> {
+      use k_s <- result.try(resolve_type(bctx, k_ty, tp_map))
+      use v_s <- result.try(resolve_type(bctx, v_ty, tp_map))
+      let conv = case k_s.conv == Direct && v_s.conv == Direct {
+        True -> Direct
+        False -> MapConv(k_s.conv, v_s.conv)
+      }
+      let gleam_args = "(" <> k_s.gleam_ty <> ", " <> v_s.gleam_ty <> ")"
+      let adapter_args = "[" <> k_s.adapter_ty <> ", " <> v_s.adapter_ty <> "]"
+      let mbt_args = "[" <> k_s.mbt_ty <> ", " <> v_s.mbt_ty <> "]"
+      let arg_ext = dict.merge(k_s.used_external_types, v_s.used_external_types)
+      let arg_mapped = set.union(k_s.mapped_imports, v_s.mapped_imports)
+      let arg_extra = dict.merge(k_s.extra_pkgs, v_s.extra_pkgs)
+      let #(final_gleam_ty, merged_ext, mapped_imports) = case
+        dict.get(bctx.options.map_types, "Map")
+      {
+        Ok(#(map_mod, map_ty_name)) -> {
+          let next_mapped = case map_mod {
+            "" -> arg_mapped
+            _ -> set.insert(arg_mapped, #(map_mod, map_ty_name))
+          }
+          #(map_ty_name <> gleam_args, arg_ext, next_mapped)
+        }
+        Error(_) -> {
+          let ext_ref =
+            ExternalTypeRef(
+              gleam_name: "Map",
+              pkg_path: "builtin",
+              mbt_name: "Map",
+              arity: 2,
+            )
+          #(
+            "Map" <> gleam_args,
+            dict.insert(arg_ext, "Map", ext_ref),
+            arg_mapped,
+          )
+        }
+      }
+      Ok(ResolvedTypeSpec(
+        gleam_ty: final_gleam_ty,
+        adapter_ty: "Map" <> adapter_args,
+        mbt_ty: "Map" <> mbt_args,
+        conv:,
+        needs_option: k_s.needs_option || v_s.needs_option,
+        needs_gprelude: k_s.needs_gprelude || v_s.needs_gprelude,
+        needs_float_pkg: k_s.needs_float_pkg || v_s.needs_float_pkg,
+        needs_int16_pkg: k_s.needs_int16_pkg || v_s.needs_int16_pkg,
+        used_external_types: merged_ext,
+        mapped_imports:,
+        extra_pkgs: arg_extra,
       ))
     }
 

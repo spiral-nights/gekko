@@ -1,5 +1,5 @@
 ///|
-pub fn slugify(title : String) -> String {
+pub fn slugify(title : StringView) -> StringView {
   @text.trim_lower_dash(title)
 }
 

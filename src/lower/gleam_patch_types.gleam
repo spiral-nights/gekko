@@ -325,7 +325,9 @@ fn canonicalize_external_types(
                     other -> other
                   }
                   case norm_pkg, ext_ty, norm_args {
-                    "moonbitlang/core/builtin", "String", [] -> IrTypeString
+                    "moonbitlang/core/builtin", "String", []
+                    | "moonbitlang/core/builtin", "StringView", []
+                    -> IrTypeString
                     "moonbitlang/core/builtin", "Int64", [] -> IrTypeInt64
                     "moonbitlang/core/builtin", "Double", [] -> IrTypeDouble
                     "moonbitlang/core/builtin", "Bool", [] -> IrTypeBool

@@ -80,6 +80,21 @@ fn[T] GList::reverse(self : GList[T]) -> GList[T] {
 }
 
 ///|
+pub fn[A, B] GList::map(self : GList[A], f : (A) -> B) -> GList[B] {
+  let mut rev : GList[B] = Nil
+  for cur = self {
+    match cur {
+      Nil => break
+      Cons(head, tail) => {
+        rev = Cons(f(head), rev)
+        continue tail
+      }
+    }
+  }
+  rev.reverse()
+}
+
+///|
 /// Bit-accurate binary backing Gleam's `BitArray`.
 #derive(Eq, Debug, Hash)
 pub(all) struct BitArray {
@@ -100,8 +115,8 @@ pub fn BitArray::from_bytes(b : Bytes) -> BitArray {
 }
 
 ///|
-/// Encode a `String` as UTF-8 bytes into a `BitArray`.
-pub fn BitArray::from_string(s : String) -> BitArray {
+/// Encode a `StringView` as UTF-8 bytes into a `BitArray`.
+pub fn BitArray::from_string(s : StringView) -> BitArray {
   BitArray::from_bytes(@utf8.encode(s))
 }
 
@@ -477,7 +492,7 @@ fn write_utf16_cp(buf : @buffer.Buffer, c : Int, big_endian : Bool) -> Unit {
 }
 
 ///|
-pub fn BitArray::from_utf16(s : String, big_endian : Bool) -> BitArray {
+pub fn BitArray::from_utf16(s : StringView, big_endian : Bool) -> BitArray {
   let buf = @buffer.Buffer()
   for ch in s {
     write_utf16_cp(buf, ch.to_int(), big_endian)
@@ -486,7 +501,7 @@ pub fn BitArray::from_utf16(s : String, big_endian : Bool) -> BitArray {
 }
 
 ///|
-pub fn BitArray::from_utf32(s : String, big_endian : Bool) -> BitArray {
+pub fn BitArray::from_utf32(s : StringView, big_endian : Bool) -> BitArray {
   let buf = @buffer.Buffer()
   for ch in s {
     write_u32(buf, ch.to_int(), big_endian)
@@ -898,7 +913,7 @@ pub(all) enum Dynamic {
   DynBool(Bool)
   DynInt(Int64)
   DynFloat(Double)
-  DynString(String)
+  DynString(StringView)
   DynBitArray(BitArray)
   DynList(GList[Dynamic])
   DynArray(Array[Dynamic])
@@ -985,16 +1000,15 @@ pub fn float_div(a : Double, b : Double) -> Double {
 }
 
 ///|
-pub fn string_has_prefix(s : String, prefix : String) -> Bool {
+pub fn string_has_prefix(s : StringView, prefix : StringView) -> Bool {
   s.has_prefix(prefix)
 }
 
 ///|
-pub fn string_drop_prefix(s : String, prefix : String) -> String {
-  if s.has_prefix(prefix) {
-    s.unsafe_substring(start=prefix.length(), end=s.length())
-  } else {
-    s
+pub fn string_drop_prefix(s : StringView, prefix : StringView) -> StringView {
+  match s.strip_prefix(prefix) {
+    Some(rest) => rest
+    None => s
   }
 }
 
@@ -1073,7 +1087,7 @@ fn write_hex4_upper(buf : StringBuilder, code : Int) -> Unit {
 }
 
 ///|
-fn escape_gleam_string(s : String) -> String {
+fn escape_gleam_string(s : StringView) -> String {
   let buf = StringBuilder()
   buf.write_char('"')
   for ch in s {
@@ -1150,8 +1164,13 @@ pub impl GleamInspect for Unit with gleam_inspect(_) {
 }
 
 ///|
-pub impl GleamInspect for String with gleam_inspect(self) {
+pub impl GleamInspect for StringView with gleam_inspect(self) {
   escape_gleam_string(self)
+}
+
+///|
+pub impl GleamInspect for String with gleam_inspect(self) {
+  escape_gleam_string(self.to_string_view())
 }
 
 ///|
@@ -1208,7 +1227,9 @@ pub impl[T : GleamInspect] GleamInspect for GList[T] with gleam_inspect(self) {
       }
       list_buf.write_char(']')
       if all_char {
-        "charlist.from_string(" + escape_gleam_string(char_buf.to_string()) + ")"
+        "charlist.from_string(" +
+        escape_gleam_string(char_buf.to_string().to_string_view()) +
+        ")"
       } else {
         list_buf.to_string()
       }
@@ -1431,8 +1452,13 @@ pub impl ToDynamic for Dynamic with to_dynamic(self) {
 }
 
 ///|
-pub impl ToDynamic for String with to_dynamic(self) {
+pub impl ToDynamic for StringView with to_dynamic(self) {
   DynString(self)
+}
+
+///|
+pub impl ToDynamic for String with to_dynamic(self) {
+  DynString(self.to_string_view())
 }
 
 ///|
@@ -1661,12 +1687,16 @@ pub fn[T : ToDynamic] to_dynamic(val : T) -> Dynamic {
 }
 
 ///|
-pub fn[T : GleamInspect] gleam_inspect(val : T) -> String {
-  GleamInspect::gleam_inspect(val)
+pub fn[T : GleamInspect] gleam_inspect(val : T) -> StringView {
+  GleamInspect::gleam_inspect(val).to_string_view()
 }
 
 ///|
-pub fn[T : GleamInspect] echo_val(val : T, loc : String, msg : String) -> T {
+pub fn[T : GleamInspect] echo_val(
+  val : T,
+  loc : StringView,
+  msg : StringView,
+) -> T {
   let header = if msg == "" { loc } else { loc + " " + msg }
   @prelude.eprintln(header)
   @prelude.eprintln(GleamInspect::gleam_inspect(val))

@@ -31,13 +31,13 @@ pub fn golden_pipeline_use_and_strings_test() -> Unit {
   if !((@pure_gleam.run_pipeline(4L) == 28L)) {
     @prelude.abort("assertion failed")
   }
-  if !((@pure_gleam.parse_command("cmd:build") == Ok("[cmd]:build"))) {
+  if !((@pure_gleam.parse_command(("cmd:build" : StringView)) == Ok(("[cmd]:build" : StringView)))) {
     @prelude.abort("assertion failed")
   }
-  if !((@pure_gleam.parse_command("cmd:") == Err("empty"))) {
+  if !((@pure_gleam.parse_command(("cmd:" : StringView)) == Err(("empty" : StringView)))) {
     @prelude.abort("assertion failed")
   }
-  if !((@pure_gleam.parse_command("other") == Err("unknown"))) {
+  if !((@pure_gleam.parse_command(("other" : StringView)) == Err(("unknown" : StringView)))) {
     @prelude.abort("assertion failed")
   }
 }
@@ -49,13 +49,13 @@ test "golden_pipeline_use_and_strings_test" {
 
 ///|
 pub fn golden_models_getters_and_updates_test() -> Unit {
-  let admin = @models.make_admin(7L, "Ada")
+  let admin = @models.make_admin(7L, ("Ada" : StringView))
   let p = @models.Point(x=1.5, y=2.5)
   let (id, name, shifted, hook_val) = @pure_gleam.check_user(admin, p)
   if !((id == 7L)) {
     @prelude.abort("assertion failed")
   }
-  if !((name == "Ada")) {
+  if !((name == ("Ada" : StringView))) {
     @prelude.abort("assertion failed")
   }
   if !((shifted.x() == 6.5)) {
@@ -68,7 +68,7 @@ pub fn golden_models_getters_and_updates_test() -> Unit {
     @prelude.abort("assertion failed")
   }
   let promoted = @models.promote(admin, 99L)
-  if !((promoted == @models.Admin(id=7L, name="Ada", level=99L))) {
+  if !((promoted == @models.Admin(id=7L, name=("Ada" : StringView), level=99L))) {
     @prelude.abort("assertion failed")
   }
 }

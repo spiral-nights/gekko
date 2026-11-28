@@ -20,13 +20,14 @@ pub type TypeConv {
   NarrowByte
   ReinterpretUInt64
   Float32
-  StringViewConv
+  StringConv
   CharConv
   BytesConv
   BytesViewConv
   ArrayConv(TypeConv)
   ArrayViewConv(TypeConv)
   FixedArrayConv(TypeConv)
+  MapConv(TypeConv, TypeConv)
   OptionConv(TypeConv)
   ResultConv(TypeConv, TypeConv)
   TupleConv(List(TypeConv))
@@ -181,7 +182,7 @@ pub fn build_adapter_fn(
   let ret_sig = case f.raises, resolved_err {
     True, Some(err_spec) ->
       "Result[" <> resolved_ret.adapter_ty <> ", " <> err_spec.adapter_ty <> "]"
-    True, None -> "Result[" <> resolved_ret.adapter_ty <> ", String]"
+    True, None -> "Result[" <> resolved_ret.adapter_ty <> ", StringView]"
     False, _ -> resolved_ret.adapter_ty
   }
 
@@ -242,7 +243,7 @@ pub fn build_adapter_fn(
         <> raw_call
         <> "\n    Ok("
         <> ok_expr
-        <> ")\n  } catch {\n    __err => Err(Error::to_string(__err))\n  }"
+        <> ")\n  } catch {\n    __err => Err((Error::to_string(__err)).to_string_view())\n  }"
       #(body_str, hk_final)
     }
   }
@@ -311,7 +312,7 @@ pub fn expr_to_mbt(
     NarrowByte -> #("__to_byte(" <> expr <> ")", set.insert(helpers, "byte"))
     ReinterpretUInt64 -> #("(" <> expr <> ").reinterpret_as_uint64()", helpers)
     Float32 -> #("@float.Float::from_double(" <> expr <> ")", helpers)
-    StringViewConv -> #("(" <> expr <> ").to_string_view()", helpers)
+    StringConv -> #("(" <> expr <> ").to_owned()", helpers)
     CharConv -> #("__to_char(" <> expr <> ")", set.insert(helpers, "char"))
     BytesConv -> #("(" <> expr <> ").data", helpers)
     BytesViewConv -> #("(" <> expr <> ").data[:]", helpers)
@@ -360,6 +361,38 @@ pub fn expr_to_mbt(
         h1,
       )
     }
+
+    MapConv(k_c, v_c) ->
+      case k_c == Direct && v_c == Direct {
+        True -> #(expr, helpers)
+        False -> {
+          let kv = "mk" <> int.to_string(depth)
+          let vv = "mv" <> int.to_string(depth)
+          let m_var = "map" <> int.to_string(depth)
+          let #(k_e, h1) = expr_to_mbt(k_c, kv, helpers, depth + 1)
+          let #(v_e, h2) = expr_to_mbt(v_c, vv, h1, depth + 1)
+          #(
+            "{ let "
+              <> m_var
+              <> " = Map([]); ("
+              <> expr
+              <> ").each(fn("
+              <> kv
+              <> ", "
+              <> vv
+              <> ") { "
+              <> m_var
+              <> "["
+              <> k_e
+              <> "] = "
+              <> v_e
+              <> " }); "
+              <> m_var
+              <> " }",
+            h2,
+          )
+        }
+      }
 
     OptionConv(inner) ->
       case inner {
@@ -470,8 +503,8 @@ pub fn expr_from_mbt(
     NarrowInt16 -> #("@int16.Int16::to_int64(" <> expr <> ")", helpers)
     ReinterpretUInt64 -> #("(" <> expr <> ").reinterpret_as_int64()", helpers)
     Float32 -> #("@float.Float::to_double(" <> expr <> ")", helpers)
-    StringViewConv -> #("(" <> expr <> ").to_owned()", helpers)
-    CharConv -> #("(" <> expr <> ").to_string()", helpers)
+    StringConv -> #("(" <> expr <> ").to_string_view()", helpers)
+    CharConv -> #("(" <> expr <> ").to_string().to_string_view()", helpers)
     BytesConv -> #("@gprelude.BitArray::from_bytes(" <> expr <> ")", helpers)
     BytesViewConv -> #(
       "@gprelude.BitArray::from_bytes((" <> expr <> ").to_bytes())",
@@ -534,6 +567,38 @@ pub fn expr_from_mbt(
         h1,
       )
     }
+
+    MapConv(k_c, v_c) ->
+      case k_c == Direct && v_c == Direct {
+        True -> #(expr, helpers)
+        False -> {
+          let kv = "mk" <> int.to_string(depth)
+          let vv = "mv" <> int.to_string(depth)
+          let m_var = "map" <> int.to_string(depth)
+          let #(k_e, h1) = expr_from_mbt(k_c, kv, helpers, depth + 1)
+          let #(v_e, h2) = expr_from_mbt(v_c, vv, h1, depth + 1)
+          #(
+            "{ let "
+              <> m_var
+              <> " = Map([]); ("
+              <> expr
+              <> ").each(fn("
+              <> kv
+              <> ", "
+              <> vv
+              <> ") { "
+              <> m_var
+              <> "["
+              <> k_e
+              <> "] = "
+              <> v_e
+              <> " }); "
+              <> m_var
+              <> " }",
+            h2,
+          )
+        }
+      }
 
     OptionConv(inner) ->
       case inner {
@@ -1394,7 +1459,7 @@ pub fn emit_adapter_helpers(helper_kinds: Set(String)) -> List(String) {
     ),
     #(
       "char",
-      "///|\nfn __to_char(s : String) -> Char {\n  match s.get_char(0) {\n    Some(c) => c\n    None => abort(\"Expected non-empty String for Char\")\n  }\n}",
+      "///|\nfn __to_char(s : StringView) -> Char {\n  match s.get_char(0) {\n    Some(c) => c\n    None => abort(\"Expected non-empty String for Char\")\n  }\n}",
     ),
   ]
 

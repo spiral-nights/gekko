@@ -9,21 +9,24 @@ import gleam/string
 import index/symbol_table.{type SymbolTable}
 import lower/ir.{
   type IrBinOp, type IrCallArg, type IrClause, type IrConstant, type IrExpr,
-  type IrFunction, type IrModule, type IrStmt, AssertAbort, IrAbort, IrAddFloat,
-  IrAddInt, IrAnd, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak, IrCall,
-  IrConstructor, IrContinue, IrDivFloat, IrDivInt, IrEcho, IrEq, IrFloat, IrFn,
-  IrForLoop, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt, IrInt,
-  IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch, IrModuleRef,
-  IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr, IrParam,
-  IrPatDiscard, IrPatUnit, IrPatVar, IrRemInt, IrStmtAssert, IrStmtExpr,
+  type IrFunction, type IrModule, type IrStmt, type IrType, AssertAbort, IrAbort,
+  IrAddFloat, IrAddInt, IrAnd, IrBinOp, IrBitString, IrBlock, IrBool, IrBreak,
+  IrCall, IrConstructor, IrContinue, IrDivFloat, IrDivInt, IrEcho, IrEq, IrFloat,
+  IrFn, IrForLoop, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt,
+  IrInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch,
+  IrModuleRef, IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr,
+  IrParam, IrPatDiscard, IrPatUnit, IrPatVar, IrRemInt, IrStmtAssert, IrStmtExpr,
   IrStmtGuard, IrStmtLet, IrString, IrStringConcat, IrSubFloat, IrSubInt,
-  IrTuple, IrTupleIndex, IrTypeAlias, IrTypeDef, IrUnit, IrVar, LetAssertAbort,
-  PanicAbort, TodoAbort,
+  IrTuple, IrTupleIndex, IrTypeAlias, IrTypeDef, IrTypeFn, IrTypeList,
+  IrTypeNamed, IrTypeResult, IrTypeString, IrTypeTuple, IrUnit, IrVar,
+  LetAssertAbort, PanicAbort, TodoAbort,
 }
 
 import lower/ir_util
 import lower/mangle
-import moonbit/ffi_meta.{type FfiMetadata}
+import moonbit/ffi_meta.{
+  type FfiMetadata, type MbtType, MbtFn, MbtNamed, MbtTuple,
+}
 import project/prepass.{GleamPatch, PackageCall, Patched, WasmImport}
 
 import emit/moonbit_decl.{
@@ -317,12 +320,37 @@ fn emit_function(f: IrFunction, ctx: EmitCtx) -> #(String, EmitCtx) {
           register_import(ctx2, pkg, default_alias, default_alias)
         }
       }
-      let call_args =
-        list.map(f.params, fn(p) { p.name })
-        |> string.join(", ")
-      let body =
-        "  @" <> ffi_alias <> "." <> target_fn <> "(" <> call_args <> ")"
-      #("///|\n" <> header <> " {\n" <> body <> "\n}", ctx_imp)
+      let fn_meta_opt =
+        ffi_meta.lookup_function(ctx_imp.ffi_metadata, pkg, target_fn)
+      let call_args = case fn_meta_opt {
+        Some(fn_meta) ->
+          case list.length(fn_meta.param_types) == list.length(f.params) {
+            True ->
+              list.zip(f.params, fn_meta.param_types)
+              |> list.map(fn(pair) {
+                let #(p, mbt_ty) = pair
+                coerce_ffi_arg(p.param_type, mbt_ty, p.name, 0)
+              })
+              |> string.join(", ")
+            False ->
+              list.map(f.params, fn(p) { p.name })
+              |> string.join(", ")
+          }
+        None ->
+          list.map(f.params, fn(p) { p.name })
+          |> string.join(", ")
+      }
+      let raw_call =
+        "@" <> ffi_alias <> "." <> target_fn <> "(" <> call_args <> ")"
+      let body_expr = case fn_meta_opt {
+        Some(fn_meta) ->
+          case fn_meta.return_type {
+            Some(ret_mbt) -> coerce_ffi_ret(f.return_type, ret_mbt, raw_call, 0)
+            None -> raw_call
+          }
+        None -> raw_call
+      }
+      #("///|\n" <> header <> " {\n  " <> body_expr <> "\n}", ctx_imp)
     }
 
     Some(Patched) -> {
@@ -552,7 +580,10 @@ fn emit_stmt(
     ) -> {
       let #(val_str, ctx1) = emit_expr(value, ctx)
       let #(msg_str, ctx2) = case abort_message {
-        Some(m) -> emit_expr(m, ctx1)
+        Some(m) -> {
+          let #(m_str, c_m) = emit_expr(m, ctx1)
+          #("(" <> m_str <> ").to_owned()", c_m)
+        }
         None -> #("\"let assert failed\"", ctx1)
       }
       let ctx_pat =
@@ -666,7 +697,10 @@ fn emit_stmt(
     IrStmtAssert(condition:, abort_message:) -> {
       let #(cond_str, ctx1) = emit_expr(condition, ctx)
       let #(msg_str, ctx2) = case abort_message {
-        Some(m) -> emit_expr(m, ctx1)
+        Some(m) -> {
+          let #(m_str, c_m) = emit_expr(m, ctx1)
+          #("(" <> m_str <> ").to_owned()", c_m)
+        }
         None -> #("\"assertion failed\"", ctx1)
       }
       #(
@@ -713,7 +747,10 @@ fn emit_expr_indented(
   case expr {
     IrInt(val) -> #(val <> "L", ctx)
     IrFloat(val) -> #(val, ctx)
-    IrString(val) -> #("\"" <> escape_string_literal(val) <> "\"", ctx)
+    IrString(val) -> #(
+      "(\"" <> escape_string_literal(val) <> "\" : StringView)",
+      ctx,
+    )
     IrBool(True) -> #("true", ctx)
     IrBool(False) -> #("false", ctx)
     IrUnit -> #("()", ctx)
@@ -892,7 +929,10 @@ fn emit_expr_indented(
         TodoAbort -> "\"not yet implemented\""
       }
       let #(msg_str, ctx1) = case message {
-        Some(m) -> emit_expr(m, ctx)
+        Some(m) -> {
+          let #(m_str, c_m) = emit_expr(m, ctx)
+          #("(" <> m_str <> ").to_owned()", c_m)
+        }
         None -> #(default_msg, ctx)
       }
       #("@prelude.abort(" <> msg_str <> ")", ctx1)
@@ -1594,4 +1634,164 @@ fn emit_clause(
     indent <> pat_part <> guard_part <> " => " <> body_str,
     EmitCtx(..ctx3, local_vars: saved_locals),
   )
+}
+
+fn coerce_ffi_arg(
+  ir_ty: IrType,
+  mbt_ty: MbtType,
+  expr: String,
+  depth: Int,
+) -> String {
+  coerce_ffi_value(ir_ty, mbt_ty, expr, True, depth)
+}
+
+fn coerce_ffi_ret(
+  ir_ty: IrType,
+  mbt_ty: MbtType,
+  expr: String,
+  depth: Int,
+) -> String {
+  coerce_ffi_value(ir_ty, mbt_ty, expr, False, depth)
+}
+
+fn coerce_ffi_value(
+  ir_ty: IrType,
+  mbt_ty: MbtType,
+  expr: String,
+  to_mbt: Bool,
+  depth: Int,
+) -> String {
+  case ir_ty, mbt_ty {
+    IrTypeString, MbtNamed("String", []) ->
+      case to_mbt {
+        True -> "(" <> expr <> ").to_owned()"
+        False -> "(" <> expr <> ").to_string_view()"
+      }
+
+    IrTypeNamed(name: "Option", args: [inner_ir], ..),
+      MbtNamed("Option", [inner_mbt])
+    -> {
+      let v = "__s" <> int.to_string(depth)
+      let inner_e = coerce_ffi_value(inner_ir, inner_mbt, v, to_mbt, depth + 1)
+      case inner_e == v {
+        True -> expr
+        False -> "(" <> expr <> ").map(fn(" <> v <> ") { " <> inner_e <> " })"
+      }
+    }
+
+    IrTypeResult(ok_ir, err_ir), MbtNamed("Result", [ok_mbt, err_mbt]) -> {
+      let ok_v = "__ok" <> int.to_string(depth)
+      let err_v = "__err" <> int.to_string(depth)
+      let ok_e = coerce_ffi_value(ok_ir, ok_mbt, ok_v, to_mbt, depth + 1)
+      let err_e = coerce_ffi_value(err_ir, err_mbt, err_v, to_mbt, depth + 1)
+      case ok_e == ok_v && err_e == err_v {
+        True -> expr
+        False ->
+          "match "
+          <> expr
+          <> " { Ok("
+          <> ok_v
+          <> ") => Ok("
+          <> ok_e
+          <> "); Err("
+          <> err_v
+          <> ") => Err("
+          <> err_e
+          <> ") }"
+      }
+    }
+
+    IrTypeList(inner_ir), MbtNamed("GList", [inner_mbt]) -> {
+      let v = "__el" <> int.to_string(depth)
+      let inner_e = coerce_ffi_value(inner_ir, inner_mbt, v, to_mbt, depth + 1)
+      case inner_e == v {
+        True -> expr
+        False -> "(" <> expr <> ").map(fn(" <> v <> ") { " <> inner_e <> " })"
+      }
+    }
+
+    IrTypeNamed(args: [k_ir, v_ir], ..), MbtNamed("Map", [k_mbt, v_mbt]) -> {
+      let kv = "__mk" <> int.to_string(depth)
+      let vv = "__mv" <> int.to_string(depth)
+      let k_e = coerce_ffi_value(k_ir, k_mbt, kv, to_mbt, depth + 1)
+      let v_e = coerce_ffi_value(v_ir, v_mbt, vv, to_mbt, depth + 1)
+      case k_e == kv && v_e == vv {
+        True -> expr
+        False -> {
+          let m_var = "__map" <> int.to_string(depth)
+          "{ let "
+          <> m_var
+          <> " = Map([]); ("
+          <> expr
+          <> ").each(fn("
+          <> kv
+          <> ", "
+          <> vv
+          <> ") { "
+          <> m_var
+          <> "["
+          <> k_e
+          <> "] = "
+          <> v_e
+          <> " }); "
+          <> m_var
+          <> " }"
+        }
+      }
+    }
+
+    IrTypeTuple(ir_els), MbtTuple(mbt_els) ->
+      case list.length(ir_els) == list.length(mbt_els) {
+        False -> expr
+        True -> {
+          let pairs =
+            list.index_map(list.zip(ir_els, mbt_els), fn(pair, idx) {
+              let v = "__t" <> int.to_string(depth) <> "_" <> int.to_string(idx)
+              let ce = coerce_ffi_value(pair.0, pair.1, v, to_mbt, depth + 1)
+              #(v, ce)
+            })
+          case list.all(pairs, fn(p) { p.0 == p.1 }) {
+            True -> expr
+            False -> {
+              let pat =
+                "(" <> string.join(list.map(pairs, fn(p) { p.0 }), ", ") <> ")"
+              let out =
+                "(" <> string.join(list.map(pairs, fn(p) { p.1 }), ", ") <> ")"
+              "{ let " <> pat <> " = " <> expr <> "; " <> out <> " }"
+            }
+          }
+        }
+      }
+
+    IrTypeFn(p_irs, r_ir), MbtFn(p_mbts, r_mbt) ->
+      case list.length(p_irs) == list.length(p_mbts) {
+        False -> expr
+        True -> {
+          let params =
+            list.index_map(list.zip(p_irs, p_mbts), fn(pair, idx) {
+              let pname =
+                "__cb" <> int.to_string(depth) <> "_" <> int.to_string(idx)
+              let arg_e =
+                coerce_ffi_value(pair.0, pair.1, pname, !to_mbt, depth + 1)
+              #(pname, arg_e)
+            })
+          let raw_call =
+            "("
+            <> expr
+            <> ")("
+            <> string.join(list.map(params, fn(p) { p.1 }), ", ")
+            <> ")"
+          let ret_e = coerce_ffi_value(r_ir, r_mbt, raw_call, to_mbt, depth + 1)
+          case list.all(params, fn(p) { p.0 == p.1 }) && ret_e == raw_call {
+            True -> expr
+            False -> {
+              let pnames = string.join(list.map(params, fn(p) { p.0 }), ", ")
+              "fn(" <> pnames <> ") { " <> ret_e <> " }"
+            }
+          }
+        }
+      }
+
+    _, _ -> expr
+  }
 }

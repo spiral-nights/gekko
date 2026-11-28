@@ -1246,3 +1246,72 @@ pub fn gprelude_iterative_list_tuples_and_to_dynamic_e2e_test() {
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
 }
+
+pub fn opaque_type_referencing_private_type_emits_valid_visibility_test() {
+  let src =
+    "pub opaque type OpaqueBox {\n"
+    <> "  OpaqueBox(mode: InnerMode, count: Int)\n"
+    <> "}\n\n"
+    <> "type InnerMode {\n"
+    <> "  Direct(InnerDetail)\n"
+    <> "}\n\n"
+    <> "type InnerDetail {\n"
+    <> "  Fast\n"
+    <> "  Slow\n"
+    <> "}\n\n"
+    <> "type UnusedPrivate {\n"
+    <> "  Unused\n"
+    <> "}\n\n"
+    <> "pub fn make() -> OpaqueBox {\n"
+    <> "  OpaqueBox(mode: Direct(Fast), count: 1)\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("opaque_mod", src)
+  let table =
+    symbol_table.index_project(
+      "opaque_pkg",
+      [#("opaque_mod", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "opaque_mod")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+
+  assert string.contains(mbt, "pub enum OpaqueBox {")
+  assert string.contains(mbt, "pub enum InnerMode {")
+  assert string.contains(mbt, "pub enum InnerDetail {")
+  assert !string.contains(mbt, "pub(all) enum InnerMode")
+  assert !string.contains(mbt, "pub(all) enum InnerDetail")
+  assert string.contains(mbt, "priv enum UnusedPrivate {")
+  assert string.contains(mbt, "fn OpaqueBox::mode(self : OpaqueBox)")
+  assert !string.contains(mbt, "pub fn OpaqueBox::mode(")
+}
+
+pub fn type_param_matching_local_type_name_is_prefixed_test() {
+  let src =
+    "pub type Definition(definition) {\n"
+    <> "  Definition(value: definition)\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("def_mod", src)
+  let table =
+    symbol_table.index_project(
+      "def_pkg",
+      [#("def_mod", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "def_mod")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+
+  assert string.contains(mbt, "pub(all) enum Definition[T_Definition] {")
+  assert string.contains(
+    mbt,
+    "for Definition[T_Definition] with gleam_inspect(self)",
+  )
+  assert string.contains(
+    mbt,
+    "pub fn[T_Definition] Definition::value(self : Definition[T_Definition]) -> T_Definition",
+  )
+  assert !string.contains(mbt, "Definition[Definition]")
+}

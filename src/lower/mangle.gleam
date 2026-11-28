@@ -1,5 +1,6 @@
 import gleam/int
 import gleam/list
+import gleam/set.{type Set}
 import gleam/string
 
 /// Return True if `name` collides with a MoonBit reserved keyword.
@@ -218,6 +219,25 @@ pub fn mangle_type_param(name: String) -> String {
   {
     True -> "T_" <> base
     False -> base
+  }
+}
+
+/// Like `mangle_type_param`, additionally prefixing `T_` so the type
+/// parameter never shadows any type name in `forbidden`.
+pub fn mangle_type_param_avoiding(
+  name: String,
+  forbidden: Set(String),
+) -> String {
+  avoid_type_name_collision(mangle_type_param(name), forbidden)
+}
+
+fn avoid_type_name_collision(
+  candidate: String,
+  forbidden: Set(String),
+) -> String {
+  case set.contains(forbidden, candidate) {
+    True -> avoid_type_name_collision("T_" <> candidate, forbidden)
+    False -> candidate
   }
 }
 

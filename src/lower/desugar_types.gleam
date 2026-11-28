@@ -33,12 +33,36 @@ pub type LowerCtx {
   )
 }
 
+pub fn local_type_names(mod_syms: ModuleSymbols) -> Set(String) {
+  let from_types =
+    dict.fold(mod_syms.types, set.new(), fn(acc, k, ti) {
+      acc
+      |> set.insert(k)
+      |> set.insert(ti.name)
+      |> set.insert(mangle.mangle_type_name(ti.name))
+    })
+  dict.fold(mod_syms.type_aliases, from_types, fn(acc, k, ta) {
+    acc
+    |> set.insert(k)
+    |> set.insert(ta.name)
+    |> set.insert(mangle.mangle_type_name(ta.name))
+  })
+}
+
+pub fn mangle_type_param_in_mod(
+  name: String,
+  mod_syms: ModuleSymbols,
+) -> String {
+  mangle.mangle_type_param_avoiding(name, local_type_names(mod_syms))
+}
+
 pub fn lower_type_def(
   type_info: TypeInfo,
   mod_syms: ModuleSymbols,
   table: SymbolTable,
 ) -> IrTypeDef {
-  let type_params = list.map(type_info.parameters, mangle.mangle_type_param)
+  let type_params =
+    list.map(type_info.parameters, mangle_type_param_in_mod(_, mod_syms))
   let variants =
     list.map(type_info.variants, fn(variant) {
       let fields =
@@ -92,7 +116,8 @@ pub fn synthesize_getters(
   mod_syms: ModuleSymbols,
   table: SymbolTable,
 ) -> List(IrGetter) {
-  let type_params = list.map(type_info.parameters, mangle.mangle_type_param)
+  let type_params =
+    list.map(type_info.parameters, mangle_type_param_in_mod(_, mod_syms))
   let variants =
     list.map(type_info.variants, fn(v) {
       let positional = list.count(v.fields, fn(f) { option.is_none(f.label) })
@@ -106,7 +131,10 @@ pub fn synthesize_getters(
     IrGetter(
       type_name: mangle.mangle_type_name(type_info.name),
       type_params:,
-      publicity: type_info.publicity,
+      publicity: case type_info.opaque_ {
+        True -> glance.Private
+        False -> type_info.publicity
+      },
       field_name: mangle.mangle_ident(field_name),
       return_type: resolved_type_to_ir_with_table(
         resolved_ty,
@@ -567,7 +595,7 @@ pub fn resolved_type_to_ir_with_table(
       let name = case named_type_params {
         Some(names) ->
           case list_at(names, id) {
-            Some(n) -> mangle.mangle_type_param(n)
+            Some(n) -> mangle_type_param_in_mod(n, mod_syms)
             None -> mangle.type_var_id_to_name(id)
           }
         None -> mangle.type_var_id_to_name(id)
@@ -699,7 +727,7 @@ pub fn lower_ast_type_with_vars(
       )
 
     glance.VariableType(name:, ..) | glance.HoleType(name:, ..) -> {
-      let mangled = mangle.mangle_type_param(name)
+      let mangled = mangle_type_param_in_mod(name, mod_syms)
       case dict.get(ast_type_vars, mangled) {
         Ok(canon) -> IrTypeVar(canon)
         Error(_) -> IrTypeVar(mangled)
@@ -908,7 +936,7 @@ fn expand_ast_type_alias(
                     )
                   let subst =
                     list.zip(
-                      list.map(ta.parameters, mangle.mangle_type_param),
+                      list.map(ta.parameters, mangle_type_param_in_mod(_, ts)),
                       args,
                     )
                     |> dict.from_list

@@ -17,7 +17,8 @@ import lower/ir.{
   IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr, IrParam,
   IrPatDiscard, IrPatUnit, IrPatVar, IrRemInt, IrStmtAssert, IrStmtExpr,
   IrStmtGuard, IrStmtLet, IrString, IrStringConcat, IrSubFloat, IrSubInt,
-  IrTuple, IrTupleIndex, IrUnit, IrVar, LetAssertAbort, PanicAbort, TodoAbort,
+  IrTuple, IrTupleIndex, IrTypeAlias, IrTypeDef, IrUnit, IrVar, LetAssertAbort,
+  PanicAbort, TodoAbort,
 }
 
 import lower/ir_util
@@ -27,9 +28,10 @@ import project/prepass.{GleamPatch, PackageCall, Patched, WasmImport}
 
 import emit/moonbit_decl.{
   type EmitCtx, EmitCtx, add_gprelude_import, add_module_import,
-  align_call_args_tracked, collect_visible_alias_names, emit_constructor_prefix,
-  emit_constructor_value, emit_fn_param, emit_getter, emit_pattern, emit_type,
-  emit_type_alias, emit_type_def, escape_plain_string, escape_string_literal,
+  align_call_args_tracked, collect_public_referenced_local_names,
+  collect_visible_alias_names, emit_constructor_prefix, emit_constructor_value,
+  emit_fn_param, emit_getter, emit_pattern, emit_type, emit_type_alias,
+  emit_type_def, escape_plain_string, escape_string_literal,
   format_function_type_params, format_type_params, infer_fn_param_types,
   is_polymorphic_constant, lookup_callee_with_bounds, lookup_ctor_field_labels,
   lookup_ctor_info, lookup_fn_param_labels, map_acc, map_index_acc,
@@ -146,13 +148,34 @@ fn emit_module_inner(
       ]),
     )
 
-  let #(raw_type_blocks, ctx1) = map_acc(module.types, ctx0, emit_type_def)
+  let pub_referenced_names = collect_public_referenced_local_names(module)
+  let effective_types =
+    list.map(module.types, fn(td) {
+      case
+        td.publicity == glance.Private
+        && set.contains(pub_referenced_names, td.name)
+      {
+        True -> IrTypeDef(..td, publicity: glance.Public, opaque_: True)
+        False -> td
+      }
+    })
+  let #(raw_type_blocks, ctx1) = map_acc(effective_types, ctx0, emit_type_def)
   let type_blocks = list.filter(raw_type_blocks, fn(b) { b != "" })
 
   let visible_alias_names = collect_visible_alias_names(module)
   let visible_aliases =
-    list.filter(module.type_aliases, fn(ta) {
-      set.contains(visible_alias_names, ta.name)
+    list.filter_map(module.type_aliases, fn(ta) {
+      case set.contains(visible_alias_names, ta.name) {
+        False -> Error(Nil)
+        True ->
+          case
+            ta.publicity == glance.Private
+            && set.contains(pub_referenced_names, ta.name)
+          {
+            True -> Ok(IrTypeAlias(..ta, publicity: glance.Public))
+            False -> Ok(ta)
+          }
+      }
     })
   let #(alias_blocks, ctx2) = map_acc(visible_aliases, ctx1, emit_type_alias)
 

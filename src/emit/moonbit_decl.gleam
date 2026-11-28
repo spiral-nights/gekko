@@ -1525,6 +1525,91 @@ fn emit_type_eq_impl(td: IrTypeDef, dict_key_params: Set(String)) -> String {
   <> "\n}"
 }
 
+/// Collect local type and alias names transitively referenced by public types
+/// or public type aliases so private dependencies of `pub opaque` types can be
+/// emitted with `pub` (non-`pub(all)`) visibility in MoonBit.
+pub fn collect_public_referenced_local_names(module: IrModule) -> Set(String) {
+  let seed_types =
+    list.fold(module.types, set.new(), fn(acc, td) {
+      case td.publicity {
+        glance.Public -> set.insert(acc, td.name)
+        glance.Private -> acc
+      }
+    })
+  let seed =
+    list.fold(module.type_aliases, seed_types, fn(acc, ta) {
+      case ta.publicity {
+        glance.Public -> set.insert(acc, ta.name)
+        glance.Private -> acc
+      }
+    })
+  expand_public_referenced_names(
+    module.types,
+    module.type_aliases,
+    module.module_name,
+    seed,
+  )
+}
+
+fn expand_public_referenced_names(
+  types: List(IrTypeDef),
+  aliases: List(IrTypeAlias),
+  cur_mod: String,
+  pub_names: Set(String),
+) -> Set(String) {
+  let type_uses_either = fn(ty: IrType, name: String, unmangled: String) -> Bool {
+    type_uses_local_name(ty, cur_mod, name)
+    || { unmangled != name && type_uses_local_name(ty, cur_mod, unmangled) }
+  }
+  let is_referenced_by_pub = fn(
+    name: String,
+    unmangled: String,
+    cur_set: Set(String),
+  ) {
+    list.any(types, fn(other_td) {
+      other_td.external_type == None
+      && set.contains(cur_set, other_td.name)
+      && list.any(other_td.variants, fn(v) {
+        list.any(v.fields, fn(f) {
+          type_uses_either(f.field_type, name, unmangled)
+        })
+      })
+    })
+    || list.any(aliases, fn(other_ta) {
+      set.contains(cur_set, other_ta.name)
+      && type_uses_either(other_ta.aliased, name, unmangled)
+    })
+  }
+  let #(next_from_types, changed_types) =
+    list.fold(types, #(pub_names, False), fn(acc, td) {
+      let #(cur_set, _ch) = acc
+      case set.contains(cur_set, td.name) {
+        True -> acc
+        False ->
+          case is_referenced_by_pub(td.name, td.unmangled_name, cur_set) {
+            True -> #(set.insert(cur_set, td.name), True)
+            False -> acc
+          }
+      }
+    })
+  let #(next_pub, changed_aliases) =
+    list.fold(aliases, #(next_from_types, changed_types), fn(acc, ta) {
+      let #(cur_set, _ch) = acc
+      case set.contains(cur_set, ta.name) {
+        True -> acc
+        False ->
+          case is_referenced_by_pub(ta.name, ta.name, cur_set) {
+            True -> #(set.insert(cur_set, ta.name), True)
+            False -> acc
+          }
+      }
+    })
+  case changed_aliases {
+    True -> expand_public_referenced_names(types, aliases, cur_mod, next_pub)
+    False -> next_pub
+  }
+}
+
 pub fn collect_visible_alias_names(module: IrModule) -> Set(String) {
   let seed =
     list.fold(module.type_aliases, set.new(), fn(acc, ta) {

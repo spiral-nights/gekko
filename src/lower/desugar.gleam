@@ -29,7 +29,8 @@ import lower/desugar_types.{
   type LowerCtx, LowerCtx, build_ast_type_var_map, find_pipe_slot_label,
   infer_const_expr_type, infer_local_expr_type, list_at,
   lower_ast_type_with_table, lower_ast_type_with_vars, lower_type_def,
-  resolve_callee_arity, resolve_module_alias_for_access, resolve_variable,
+  mangle_type_param_in_mod, resolve_callee_arity,
+  resolve_module_alias_for_access, resolve_variable,
   resolved_type_to_ir_with_table, synthesize_getters,
 }
 
@@ -95,7 +96,8 @@ pub fn desugar_module(
   let type_aliases =
     list.map(ast_type_aliases, fn(def) {
       let ta = def.definition
-      let type_params = list.map(ta.parameters, mangle.mangle_type_param)
+      let type_params =
+        list.map(ta.parameters, mangle_type_param_in_mod(_, mod_syms))
       IrTypeAlias(
         name: mangle.mangle_type_name(ta.name),
         publicity: ta.publicity,

@@ -9,6 +9,7 @@ import gleam/string
 import index/symbol_table
 import lower/desugar
 import lower/ir
+import lower/ir_util
 import lower/mangle
 import lower/pattern
 import lower/tco
@@ -1136,4 +1137,132 @@ pub fn workspace_module_pkg_dir_collision_test() {
   let _ = simplifile.delete(file_or_dir_at: root)
   let _ = simplifile.delete(file_or_dir_at: out_dir)
   Nil
+}
+
+pub fn ir_util_traversal_combinators_test() {
+  let ty =
+    ir.IrTypeFn(
+      [ir.IrTypeList(ir.IrTypeVar("a"))],
+      ir.IrTypeResult(ir.IrTypeTuple([ir.IrTypeVar("b")]), ir.IrTypeString),
+    )
+  let collected_vars =
+    ir_util.fold_type(ty, [], fn(acc, t) {
+      case t {
+        ir.IrTypeVar(v) -> [v, ..acc]
+        _ -> acc
+      }
+    })
+  assert collected_vars == ["b", "a"]
+
+  let mapped_ty =
+    ir_util.map_type_children(
+      ir.IrTypeNamed(
+        module_alias: None,
+        package: "p",
+        module: "m",
+        name: "Box",
+        args: [ir.IrTypeVar("a")],
+      ),
+      fn(t) {
+        case t {
+          ir.IrTypeVar("a") -> ir.IrTypeInt64
+          _ -> t
+        }
+      },
+    )
+  assert mapped_ty
+    == ir.IrTypeNamed(
+      module_alias: None,
+      package: "p",
+      module: "m",
+      name: "Box",
+      args: [ir.IrTypeInt64],
+    )
+
+  let sample_stmt =
+    ir.IrStmtLet(
+      pattern: ir.IrPatBitString([
+        #(ir.IrPatVar("x"), [
+          glance.SizeValueOption(ir.IrBitSizeVar("sz_var")),
+        ]),
+      ]),
+      annotation: Some(ir.IrTypeList(ir.IrTypeVar("elem"))),
+      value: ir.IrFn(
+        params: [ir.IrFnParam("p", Some(ir.IrTypeVar("p_ty")))],
+        return_type: Some(ir.IrTypeBool),
+        body: [
+          ir.IrStmtExpr(
+            ir.IrMatch(subjects: [ir.IrVar("p")], clauses: [
+              ir.IrClause(
+                patterns: [[ir.IrPatAs(ir.IrPatVar("y"), "alias_y")]],
+                guard: Some(ir.IrBool(True)),
+                prefix_bindings: [#("pre", ir.IrInt("1"))],
+                body: ir.IrBitString([
+                  #(ir.IrVar("y"), [glance.SizeValueOption(ir.IrVar("sz_expr"))]),
+                ]),
+              ),
+            ]),
+          ),
+        ],
+      ),
+    )
+
+  let visitor =
+    ir_util.IrVisitor(
+      ..ir_util.default_visitor(),
+      on_expr: fn(acc, e) {
+        case e {
+          ir.IrVar(v) -> Ok(["expr:" <> v, ..acc])
+          _ -> Ok(acc)
+        }
+      },
+      on_pattern: fn(acc, p) {
+        case p {
+          ir.IrPatVar(v) -> Ok(["pat:" <> v, ..acc])
+          _ -> Ok(acc)
+        }
+      },
+      on_type: fn(acc, t) {
+        case t {
+          ir.IrTypeVar(v) -> Ok(["ty:" <> v, ..acc])
+          _ -> Ok(acc)
+        }
+      },
+      on_bit_size: fn(acc, sz) {
+        case sz {
+          ir.IrBitSizeVar(v) -> Ok(["sz:" <> v, ..acc])
+          _ -> Ok(acc)
+        }
+      },
+    )
+  let visited = ir_util.fold_stmts([sample_stmt], [], visitor)
+  assert list.contains(visited, "pat:x")
+  assert list.contains(visited, "sz:sz_var")
+  assert list.contains(visited, "ty:elem")
+  assert list.contains(visited, "ty:p_ty")
+  assert list.contains(visited, "expr:p")
+  assert list.contains(visited, "pat:y")
+  assert list.contains(visited, "expr:y")
+  assert list.contains(visited, "expr:sz_expr")
+
+  let short_circuit =
+    ir_util.try_fold_stmts(
+      [sample_stmt],
+      Nil,
+      ir_util.IrVisitor(..ir_util.default_visitor(), on_expr: fn(_, e) {
+        case e {
+          ir.IrVar("sz_expr") -> Error("found")
+          _ -> Ok(Nil)
+        }
+      }),
+    )
+  assert short_circuit == Error("found")
+
+  let direct =
+    ir_util.fold_expr_direct_children(
+      ir.IrBinOp(op: ir.IrAddInt, left: ir.IrInt("1"), right: ir.IrInt("2")),
+      0,
+      fn(acc, _) { acc + 1 },
+    )
+  assert direct == 2
 }

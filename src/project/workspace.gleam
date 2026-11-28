@@ -13,23 +13,19 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 import index/symbol_table
-import lower/desugar
 import lower/gleam_patch
 import lower/ir as lower_ir
 import lower/ir_util
 import lower/mangle
-import lower/tco
 import lower/validate
-import moonbit/ffi_meta
+import project/analysis
 import project/diagnostics
 import project/ffi_config
 import project/fs
-import project/interface.{type PackageInterface, PackageInterface}
-import project/loader.{type LoadedDependency}
+import project/loader
 import project/moonbit_ffi
 import project/paths
 import project/prepass.{type PrepassResult}
-import project/staging
 import project/type_baseline
 import simplifile
 
@@ -66,35 +62,41 @@ pub fn transpile_project_with_tests(
   use ctx <- result.try(loader.load_project_context(project_root, include_tests))
   let project_name = ctx.project_name
   let version = ctx.version
-  let packages_hash = ctx.packages_hash
-  let discovered_deps = ctx.dependencies
-  let overlays = ctx.overlays
   let discovered_versions =
     list.fold(
-      discovered_deps,
+      ctx.dependencies,
       dict.from_list([#(project_name, version)]),
       fn(acc, dep) { dict.insert(acc, dep.package_name, dep.version) },
     )
   use version_warnings <- result.try(ffi_config.check_shim_versions(
-    overlays.shims,
+    ctx.overlays.shims,
     discovered_versions,
   ))
   let auth_warnings =
     ffi_config.check_authorized_shims(
-      overlays.authorized_shims,
+      ctx.overlays.authorized_shims,
       discovered_versions,
     )
   let version_warnings = list.append(version_warnings, auth_warnings)
   use root_moonbit_deps <- result.try(ffi_config.load_project_moonbit_deps(
     project_root,
   ))
-  use loaded_deps <- result.try(loader.load_discovered_dependencies(
+  use pa <- result.try(analysis.analyze_project_context(
     project_root,
-    discovered_deps,
-    overlays.overrides,
-    overlays.target_branches,
-    Some(packages_hash),
+    ctx,
+    include_tests,
+    True,
+    True,
   ))
+  let overlays = pa.overlays
+  let loaded_deps = pa.loaded_deps
+  let all_modules = pa.all_modules
+  let non_mirror_modules = pa.non_mirror_modules
+  let ffi_metadata = pa.ffi_metadata
+  let table = pa.table
+  let resolved_pkg_dirs = pa.resolved_pkg_dirs
+  let ir_modules = pa.ir_modules
+
   use dep_moonbit_deps <- result.try(
     list.try_map(loaded_deps, fn(dep) {
       ffi_config.load_project_moonbit_deps(dep.package_root)
@@ -109,74 +111,6 @@ pub fn transpile_project_with_tests(
     |> dict.to_list
     |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
 
-  let staging_dir = filepath.join(project_root, "build/.gekko_staging")
-  use root_iface <- result.try(
-    staging.extract_project_interface_with_packages_hash(
-      project_root,
-      staging_dir,
-      include_tests,
-      Some(packages_hash),
-    ),
-  )
-  let merged_iface = merge_package_interfaces(root_iface, loaded_deps)
-
-  let src_dir = filepath.join(project_root, "src")
-  use src_modules <- result.try(loader.discover_and_parse(src_dir, None))
-
-  let test_dir = filepath.join(project_root, "test")
-  use test_modules <- result.try(
-    case include_tests, simplifile.is_directory(test_dir) {
-      True, Ok(True) -> {
-        use parsed <- result.try(loader.discover_and_parse(
-          test_dir,
-          Some("test"),
-        ))
-        Ok(list.map(parsed, strip_gleeunit_harness))
-      }
-      _, _ -> Ok([])
-    },
-  )
-
-  let dep_tagged =
-    list.flat_map(loaded_deps, fn(dep) {
-      list.map(dep.modules, fn(entry) {
-        let #(mod_name, ast_mod, pre) = entry
-        #(dep.package_name, mod_name, ast_mod, pre)
-      })
-    })
-  let root_tagged =
-    list.append(src_modules, test_modules)
-    |> list.map(fn(entry) {
-      let #(mod_name, ast_mod, pre) = entry
-      #(project_name, mod_name, ast_mod, pre)
-    })
-  let all_modules = list.append(dep_tagged, root_tagged)
-
-  let ffi_roots =
-    list.append(list.map(loaded_deps, fn(dep) { dep.package_root }), [
-      project_root,
-    ])
-  let base_ffi_metadata =
-    ffi_meta.scan_package_roots_excluding(
-      ffi_roots,
-      overlays.patched_source_files,
-    )
-  use ffi_metadata <- result.try(scan_patched_metadata(
-    base_ffi_metadata,
-    all_modules,
-    overlays.module_patches,
-  ))
-
-  let table =
-    symbol_table.index_project_with_overlays(
-      project_name,
-      all_modules,
-      Some(merged_iface),
-      overlays.overrides,
-      overlays.type_overrides,
-      overlays.target_branches,
-      ffi_metadata,
-    )
   use _ <- result.try(validate_overlay_matches(
     overlays,
     all_modules,
@@ -185,14 +119,6 @@ pub fn transpile_project_with_tests(
   ))
 
   use _ <- result.try(validate_all_int_literals(all_modules, table))
-
-  let non_mirror_modules =
-    list.filter(all_modules, fn(entry) { entry.3.patch_mirror == None })
-
-  let resolved_pkg_dirs =
-    non_mirror_modules
-    |> list.map(fn(entry) { entry.1 })
-    |> pkg_config.resolve_module_pkg_dirs
 
   use _ <- result.try(
     simplifile.create_directory_all(out_dir)
@@ -267,13 +193,6 @@ pub fn transpile_project_with_tests(
   let all_local_pkgs =
     set.union(local_pkg_set, set.from_list(["gprelude", ..module_pkg_dirs]))
 
-  let ir_modules =
-    list.map(all_modules, fn(entry) {
-      let #(_, mod_name, ast_mod, _) = entry
-      desugar.desugar_module(ast_mod, table, mod_name)
-      |> tco.optimize_module
-    })
-
   let patch_mirrors =
     list.fold(all_modules, dict.new(), fn(acc, entry) {
       let #(_, mod_name, _, pre) = entry
@@ -346,7 +265,11 @@ pub fn transpile_project_with_tests(
         Error(_) -> project_name
       }
       let mod_patches =
-        lookup_module_patches(mod_pkg_name, mod_name, overlays.module_patches)
+        analysis.lookup_module_patches(
+          mod_pkg_name,
+          mod_name,
+          overlays.module_patches,
+        )
       use merged_imports <- result.try(merge_patch_imports(
         mod_name,
         imports,
@@ -597,69 +520,6 @@ fn prune_empty_parent_dirs(dir: String, stop_dir: String) -> Nil {
   }
 }
 
-fn merge_package_interfaces(
-  root_iface: PackageInterface,
-  loaded_deps: List(LoadedDependency),
-) -> PackageInterface {
-  let dep_modules =
-    list.fold(loaded_deps, dict.new(), fn(acc, dep) {
-      case dep.interface {
-        Some(iface) -> dict.merge(acc, iface.modules)
-        None -> acc
-      }
-    })
-  PackageInterface(
-    ..root_iface,
-    modules: dict.merge(dep_modules, root_iface.modules),
-  )
-}
-
-fn strip_gleeunit_harness(
-  entry: #(String, glance.Module, PrepassResult),
-) -> #(String, glance.Module, PrepassResult) {
-  let #(mod_name, mod, pre) = entry
-  let has_gleeunit_import =
-    list.any(mod.imports, fn(def) { def.definition.module == "gleeunit" })
-  case has_gleeunit_import {
-    False -> entry
-    True -> {
-      let filtered_imports =
-        list.filter(mod.imports, fn(def) { def.definition.module != "gleeunit" })
-      let filtered_functions =
-        list.filter(mod.functions, fn(def) {
-          let func = def.definition
-          case func.name == "main" && func.parameters == [] {
-            True -> !calls_gleeunit_main(func.body)
-            False -> True
-          }
-        })
-      let cleaned_mod =
-        glance.Module(
-          ..mod,
-          imports: filtered_imports,
-          functions: filtered_functions,
-        )
-      #(mod_name, cleaned_mod, pre)
-    }
-  }
-}
-
-fn calls_gleeunit_main(stmts: List(glance.Statement)) -> Bool {
-  case stmts {
-    [
-      glance.Expression(glance.Call(
-        function: glance.FieldAccess(
-          container: glance.Variable(name: "gleeunit", ..),
-          label: "main",
-          ..,
-        ),
-        ..,
-      )),
-    ] -> True
-    _ -> False
-  }
-}
-
 fn validate_all_int_literals(
   all_modules: List(#(String, String, glance.Module, PrepassResult)),
   table: symbol_table.SymbolTable,
@@ -683,44 +543,6 @@ fn validate_all_int_literals(
     [] -> Ok(Nil)
     _ -> Error(string.join(errors, "\n"))
   }
-}
-
-fn scan_patched_metadata(
-  base_meta: ffi_meta.FfiMetadata,
-  all_modules: List(#(String, String, glance.Module, PrepassResult)),
-  module_patches: Dict(String, ffi_config.ModulePatch),
-) -> Result(ffi_meta.FfiMetadata, String) {
-  list.try_fold(all_modules, base_meta, fn(meta_acc, entry) {
-    let #(pkg_name, mod_name, _, _) = entry
-    let patches = lookup_module_patches(pkg_name, mod_name, module_patches)
-    list.try_fold(patches, meta_acc, fn(inner_acc, patch) {
-      list.try_fold(patch.files, inner_acc, fn(file_acc, f) {
-        use content <- result.try(
-          simplifile.read(from: f.source_path)
-          |> result.map_error(fn(err) {
-            "Failed to read patch MoonBit file "
-            <> f.source_path
-            <> ": "
-            <> simplifile.describe_error(err)
-          }),
-        )
-        Ok(ffi_meta.scan_injected_mbt_source(file_acc, mod_name, content))
-      })
-    })
-  })
-}
-
-fn lookup_module_patches(
-  pkg_name: String,
-  mod_name: String,
-  module_patches: Dict(String, ffi_config.ModulePatch),
-) -> List(ffi_config.ModulePatch) {
-  let keys = [
-    pkg_name <> ":" <> mod_name,
-    pkg_name <> "." <> mod_name,
-    mod_name,
-  ]
-  list.filter_map(keys, fn(k) { dict.get(module_patches, k) })
 }
 
 fn is_builtin_alias_only_patch(patch: ffi_config.ModulePatch) -> Bool {
@@ -1102,7 +924,8 @@ fn validate_patch_decl_sigs(
       let mod_name = ir_mod.module_name
       let mod_pkg =
         dict.get(module_pkg_by_name, mod_name) |> result.unwrap(project_name)
-      let mod_patches = lookup_module_patches(mod_pkg, mod_name, module_patches)
+      let mod_patches =
+        analysis.lookup_module_patches(mod_pkg, mod_name, module_patches)
       let fn_map =
         list.fold(ir_mod.functions, dict.new(), fn(m, f) {
           m

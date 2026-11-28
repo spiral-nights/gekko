@@ -4,10 +4,42 @@
 
 ///|
 /// Immutable singly-linked list backing Gleam's `List(a)`.
-#derive(Eq, Debug, Hash)
+#derive(Debug)
 pub(all) enum GList[T] {
   Nil
   Cons(T, GList[T])
+}
+
+///|
+pub impl[T : Eq] Eq for GList[T] with equal(self, other) {
+  for a = self, b = other {
+    match (a, b) {
+      (Nil, Nil) => break true
+      (Cons(ha, ta), Cons(hb, tb)) =>
+        if ha == hb {
+          continue ta, tb
+        } else {
+          break false
+        }
+      _ => break false
+    }
+  }
+}
+
+///|
+pub impl[T : Hash] Hash for GList[T] with hash_combine(self, hasher) {
+  let mut len = 0
+  for cur = self {
+    match cur {
+      Nil => break
+      Cons(head, tail) => {
+        hasher.combine(head)
+        len = len + 1
+        continue tail
+      }
+    }
+  }
+  hasher.combine_int(len)
 }
 
 ///|
@@ -1288,6 +1320,63 @@ pub impl[
 }
 
 ///|
+pub impl[
+  A : GleamInspect,
+  B : GleamInspect,
+  C : GleamInspect,
+  D : GleamInspect,
+  E : GleamInspect,
+  F : GleamInspect,
+  G : GleamInspect,
+] GleamInspect for (A, B, C, D, E, F, G) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ", " +
+  GleamInspect::gleam_inspect(self.3) +
+  ", " +
+  GleamInspect::gleam_inspect(self.4) +
+  ", " +
+  GleamInspect::gleam_inspect(self.5) +
+  ", " +
+  GleamInspect::gleam_inspect(self.6) +
+  ")"
+}
+
+///|
+pub impl[
+  A : GleamInspect,
+  B : GleamInspect,
+  C : GleamInspect,
+  D : GleamInspect,
+  E : GleamInspect,
+  F : GleamInspect,
+  G : GleamInspect,
+  H : GleamInspect,
+] GleamInspect for (A, B, C, D, E, F, G, H) with gleam_inspect(self) {
+  "#(" +
+  GleamInspect::gleam_inspect(self.0) +
+  ", " +
+  GleamInspect::gleam_inspect(self.1) +
+  ", " +
+  GleamInspect::gleam_inspect(self.2) +
+  ", " +
+  GleamInspect::gleam_inspect(self.3) +
+  ", " +
+  GleamInspect::gleam_inspect(self.4) +
+  ", " +
+  GleamInspect::gleam_inspect(self.5) +
+  ", " +
+  GleamInspect::gleam_inspect(self.6) +
+  ", " +
+  GleamInspect::gleam_inspect(self.7) +
+  ")"
+}
+
+///|
 pub impl GleamInspect for Dynamic with gleam_inspect(self) {
   match self {
     DynNull => "Nil"
@@ -1393,6 +1482,147 @@ pub impl[T : ToDynamic] ToDynamic for GList[T] with to_dynamic(self) {
     }
   }
   DynList(rev.reverse())
+}
+
+///|
+pub impl ToDynamic for Tuple0 with to_dynamic(_) {
+  DynArray([])
+}
+
+///|
+pub impl[A : ToDynamic] ToDynamic for Tuple1[A] with to_dynamic(self) {
+  DynArray([ToDynamic::to_dynamic(self.0)])
+}
+
+///|
+pub impl[A : ToDynamic, B : ToDynamic] ToDynamic for (A, B) with to_dynamic(self) {
+  DynArray([ToDynamic::to_dynamic(self.0), ToDynamic::to_dynamic(self.1)])
+}
+
+///|
+pub impl[A : ToDynamic, B : ToDynamic, C : ToDynamic] ToDynamic for (A, B, C) with to_dynamic(
+  self,
+) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+  ])
+}
+
+///|
+pub impl[A : ToDynamic, B : ToDynamic, C : ToDynamic, D : ToDynamic] ToDynamic for (
+  A,
+  B,
+  C,
+  D,
+) with to_dynamic(self) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+    ToDynamic::to_dynamic(self.3),
+  ])
+}
+
+///|
+pub impl[
+  A : ToDynamic,
+  B : ToDynamic,
+  C : ToDynamic,
+  D : ToDynamic,
+  E : ToDynamic,
+] ToDynamic for (A, B, C, D, E) with to_dynamic(self) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+    ToDynamic::to_dynamic(self.3),
+    ToDynamic::to_dynamic(self.4),
+  ])
+}
+
+///|
+pub impl[
+  A : ToDynamic,
+  B : ToDynamic,
+  C : ToDynamic,
+  D : ToDynamic,
+  E : ToDynamic,
+  F : ToDynamic,
+] ToDynamic for (A, B, C, D, E, F) with to_dynamic(self) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+    ToDynamic::to_dynamic(self.3),
+    ToDynamic::to_dynamic(self.4),
+    ToDynamic::to_dynamic(self.5),
+  ])
+}
+
+///|
+pub impl[
+  A : ToDynamic,
+  B : ToDynamic,
+  C : ToDynamic,
+  D : ToDynamic,
+  E : ToDynamic,
+  F : ToDynamic,
+  G : ToDynamic,
+] ToDynamic for (A, B, C, D, E, F, G) with to_dynamic(self) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+    ToDynamic::to_dynamic(self.3),
+    ToDynamic::to_dynamic(self.4),
+    ToDynamic::to_dynamic(self.5),
+    ToDynamic::to_dynamic(self.6),
+  ])
+}
+
+///|
+pub impl[
+  A : ToDynamic,
+  B : ToDynamic,
+  C : ToDynamic,
+  D : ToDynamic,
+  E : ToDynamic,
+  F : ToDynamic,
+  G : ToDynamic,
+  H : ToDynamic,
+] ToDynamic for (A, B, C, D, E, F, G, H) with to_dynamic(self) {
+  DynArray([
+    ToDynamic::to_dynamic(self.0),
+    ToDynamic::to_dynamic(self.1),
+    ToDynamic::to_dynamic(self.2),
+    ToDynamic::to_dynamic(self.3),
+    ToDynamic::to_dynamic(self.4),
+    ToDynamic::to_dynamic(self.5),
+    ToDynamic::to_dynamic(self.6),
+    ToDynamic::to_dynamic(self.7),
+  ])
+}
+
+///|
+pub impl[T : ToDynamic, E : ToDynamic] ToDynamic for Result[T, E] with to_dynamic(
+  self,
+) {
+  match self {
+    Ok(v) => DynArray([DynString("ok"), ToDynamic::to_dynamic(v)])
+    Err(e) => DynArray([DynString("error"), ToDynamic::to_dynamic(e)])
+  }
+}
+
+///|
+pub impl[K : ToDynamic, V : ToDynamic] ToDynamic for @immut_hashmap.HashMap[
+  K,
+  V,
+] with to_dynamic(self) {
+  let m : Map[Dynamic, Dynamic] = Map([])
+  self.each(fn(k, v) { m[ToDynamic::to_dynamic(k)] = ToDynamic::to_dynamic(v) })
+  DynMap(m)
 }
 
 ///|

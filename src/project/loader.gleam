@@ -47,6 +47,7 @@ pub type ProjectContext {
     packages_hash: String,
     dependencies: List(DiscoveredPkg),
     overlays: ffi_config.MergedOverlays,
+    root_overlay: ffi_config.PackageOverlay,
   )
 }
 
@@ -84,6 +85,7 @@ pub fn load_project_context(
     packages_hash:,
     dependencies:,
     overlays:,
+    root_overlay:,
   ))
 }
 

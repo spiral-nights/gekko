@@ -1125,3 +1125,124 @@ pub fn trait_bounds_unify_shared_external_type_aliases_test() {
     trait_bounds.lookup_fn_bounds(bounds, "my_dict", "combine")
   assert set.contains(combine_bounds.eq_vars, "T0")
 }
+
+pub fn gprelude_iterative_list_tuples_and_to_dynamic_e2e_test() {
+  let root = "build/test_fixtures/gprelude_extra"
+  let out_dir = "build/test_fixtures/gprelude_extra_mbt"
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+
+  assert simplifile.create_directory_all(filepath.join(root, "src")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "test")) == Ok(Nil)
+  assert simplifile.create_directory_all(filepath.join(root, "moonbit/dyn_ffi"))
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "gleam.toml"),
+      contents: "name = \"gprelude_extra\"\nversion = \"0.1.0\"\n",
+    )
+    == Ok(Nil)
+
+  let mbt_pkg =
+    "import {\n"
+    <> "  \"gprelude_extra/gprelude\" @gprelude,\n"
+    <> "  \"moonbitlang/core/immut/hashmap\" @immut_hashmap,\n"
+    <> "}\n"
+  let mbt_src =
+    "///|\n"
+    <> "pub fn[T : Hash] hash_value(x : T) -> Int64 {\n"
+    <> "  Hash::hash(x).to_int64()\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.GleamInspect] inspect_val(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(x)\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn[T : @gprelude.ToDynamic] to_dyn_inspect(x : T) -> String {\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(@gprelude.to_dynamic(x))\n"
+    <> "}\n\n"
+    <> "///|\n"
+    <> "pub fn map_to_dyn_inspect() -> String {\n"
+    <> "  let m = @immut_hashmap.HashMap([(\"k\", 1L)])\n"
+    <> "  @gprelude.GleamInspect::gleam_inspect(@gprelude.to_dynamic(m))\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/dyn_ffi/moon.pkg"),
+      contents: mbt_pkg,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "moonbit/dyn_ffi/dyn_ffi.mbt"),
+      contents: mbt_src,
+    )
+    == Ok(Nil)
+
+  let gleam_src =
+    "/// @external(moonbit, \"dyn_ffi\", \"hash_value\")\n"
+    <> "pub fn hash_value(x: a) -> Int {\n"
+    <> "  let _ = x\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"dyn_ffi\", \"inspect_val\")\n"
+    <> "pub fn inspect_val(x: a) -> String {\n"
+    <> "  let _ = x\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"dyn_ffi\", \"to_dyn_inspect\")\n"
+    <> "pub fn to_dyn_inspect(x: a) -> String {\n"
+    <> "  let _ = x\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "/// @external(moonbit, \"dyn_ffi\", \"map_to_dyn_inspect\")\n"
+    <> "pub fn map_to_dyn_inspect() -> String {\n"
+    <> "  panic as \"mbt\"\n"
+    <> "}\n\n"
+    <> "pub fn make_range(n: Int, acc: List(Int)) -> List(Int) {\n"
+    <> "  case n <= 0 {\n"
+    <> "    True -> acc\n"
+    <> "    False -> make_range(n - 1, [n, ..acc])\n"
+    <> "  }\n"
+    <> "}\n"
+
+  let test_src =
+    "import gprelude_extra\n\n"
+    <> "pub fn main() -> Nil {\n  Nil\n}\n\n"
+    <> "pub fn gprelude_extra_e2e_test() {\n"
+    <> "  let xs = gprelude_extra.make_range(20_000, [])\n"
+    <> "  let ys = gprelude_extra.make_range(20_000, [])\n"
+    <> "  let zs = [0, ..ys]\n"
+    <> "  assert xs == ys\n"
+    <> "  assert xs != zs\n"
+    <> "  assert gprelude_extra.hash_value(xs) == gprelude_extra.hash_value(ys)\n"
+    <> "  let t7 = #(1, 2, 3, 4, 5, 6, 7)\n"
+    <> "  let t8 = #(1, 2, 3, 4, 5, 6, 7, 8)\n"
+    <> "  assert gprelude_extra.inspect_val(t7) == \"#(1, 2, 3, 4, 5, 6, 7)\"\n"
+    <> "  assert gprelude_extra.inspect_val(t8) == \"#(1, 2, 3, 4, 5, 6, 7, 8)\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(#()) == \"[]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(#(42)) == \"[42]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(#(1, \"two\")) == \"[1, \\\"two\\\"]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(t7) == \"[1, 2, 3, 4, 5, 6, 7]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(t8) == \"[1, 2, 3, 4, 5, 6, 7, 8]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(Ok(9)) == \"[\\\"ok\\\", 9]\"\n"
+    <> "  assert gprelude_extra.to_dyn_inspect(Error(\"bad\")) == \"[\\\"error\\\", \\\"bad\\\"]\"\n"
+    <> "  assert gprelude_extra.map_to_dyn_inspect() == \"dict.from_list([#(\\\"k\\\", 1)])\"\n"
+    <> "}\n"
+
+  assert simplifile.write(
+      to: filepath.join(root, "src/gprelude_extra.gleam"),
+      contents: gleam_src,
+    )
+    == Ok(Nil)
+  assert simplifile.write(
+      to: filepath.join(root, "test/gprelude_extra_check.gleam"),
+      contents: test_src,
+    )
+    == Ok(Nil)
+
+  let assert Ok(_) = workspace.transpile_project(root, out_dir)
+  test_helpers.assert_all_moonbit_targets_ok(out_dir, "passed: 1, failed: 0")
+
+  let _ = simplifile.delete(file_or_dir_at: root)
+  let _ = simplifile.delete(file_or_dir_at: out_dir)
+  Nil
+}

@@ -16,6 +16,7 @@ import lower/ir.{
   IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
 }
 
+import lower/ir_util
 import moonbit/ffi_meta.{type FfiMetadata, type MbtType}
 import project/prepass.{ExternalType, PackageCall, Patched}
 
@@ -852,32 +853,6 @@ fn walk_expr(
       }
     }
 
-    IrBinOp(left:, right:, ..) ->
-      walk_expr(
-        left,
-        env,
-        local_fns,
-        cur_mod,
-        cur_fn,
-        None,
-        ctx,
-        bmap,
-        allowed,
-        acc,
-      )
-      |> walk_expr(
-        right,
-        env,
-        local_fns,
-        cur_mod,
-        cur_fn,
-        None,
-        ctx,
-        bmap,
-        allowed,
-        _,
-      )
-
     IrEcho(expr: inner, message:, ..) -> {
       let acc1 =
         walk_expr(
@@ -1139,23 +1114,6 @@ fn walk_expr(
       })
     }
 
-    IrNegateInt(inner)
-    | IrNegateBool(inner)
-    | IrGetterCall(receiver: inner, ..)
-    | IrTupleIndex(tuple: inner, ..) ->
-      walk_expr(
-        inner,
-        env,
-        local_fns,
-        cur_mod,
-        cur_fn,
-        None,
-        ctx,
-        bmap,
-        allowed,
-        acc,
-      )
-
     IrBreak(inner) ->
       walk_expr(
         inner,
@@ -1170,10 +1128,15 @@ fn walk_expr(
         acc,
       )
 
-    IrTuple(els) ->
-      list.fold(els, acc, fn(a, e) {
+    IrBinOp(..)
+    | IrNegateInt(_)
+    | IrNegateBool(_)
+    | IrGetterCall(..)
+    | IrTupleIndex(..)
+    | IrTuple(_) ->
+      ir_util.fold_expr_direct_children(expr, acc, fn(a, child) {
         walk_expr(
-          e,
+          child,
           env,
           local_fns,
           cur_mod,

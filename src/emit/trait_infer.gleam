@@ -11,11 +11,11 @@ import lower/ir.{
   IrForLoop, IrGetterCall, IrGtEqFloat, IrGtEqInt, IrGtFloat, IrGtInt, IrInt,
   IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch, IrModuleRef,
   IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr, IrParam,
-  IrPatAs, IrPatTuple, IrPatVar, IrPatVariant, IrRemInt, IrStmtAssert,
-  IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrStringConcat, IrSubFloat,
-  IrSubInt, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble,
-  IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString,
-  IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
+  IrPatAs, IrPatStringPrefix, IrPatTuple, IrPatVar, IrPatVariant, IrRemInt,
+  IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrString, IrStringConcat,
+  IrSubFloat, IrSubInt, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool,
+  IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult,
+  IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar, IrUnit, IrVar,
 }
 import lower/mangle
 import moonbit/ffi_meta.{type FfiMetadata}
@@ -486,6 +486,8 @@ pub fn bind_pattern_types(
   let expanded_ty = expand_type_alias(ty, cur_mod, ctx)
   case pat, expanded_ty {
     IrPatVar(name), _ -> dict.insert(env, name, ty)
+    IrPatStringPrefix(rest: Some(name), ..), _ ->
+      dict.insert(env, name, IrTypeString)
     IrPatAs(inner, alias), _ ->
       bind_pattern_types(inner, ty, cur_mod, ctx, dict.insert(env, alias, ty))
     IrPatTuple(pats), IrTypeTuple(tys) ->

@@ -221,6 +221,7 @@ pub type IrPattern {
   IrPatInt(String)
   IrPatFloat(String)
   IrPatString(String)
+  IrPatStringPrefix(prefix: String, rest: Option(String))
   IrPatBool(Bool)
   IrPatUnit
   IrPatDiscard

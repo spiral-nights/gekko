@@ -162,35 +162,12 @@ pub fn pattern_lists_strings_and_shorthand_variants_test() {
     parse_fn.body
   let assert [c_cmd, c_hi, c_wild] = str_clauses
 
-  assert c_cmd.patterns == [[ir.IrPatVar("__str_pfx_0")]]
-  assert c_cmd.prefix_bindings
-    == [
-      #("p", ir.IrString("cmd:")),
-      #(
-        "rest",
-        ir.IrCall(
-          ir.IrModuleRef(Some("gprelude"), "gprelude", "string_drop_prefix"),
-          [
-            ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
-            ir.IrCallArg(None, ir.IrString("cmd:")),
-          ],
-        ),
-      ),
-    ]
-  // Guard has both synthetic has_prefix AND user guard wrapped with needed prefix bindings
-  let assert Some(ir.IrBinOp(ir.IrAnd, has_pfx_call, ir.IrBlock(guard_block))) =
-    c_cmd.guard
-  assert has_pfx_call
-    == ir.IrCall(
-      ir.IrModuleRef(Some("gprelude"), "gprelude", "string_has_prefix"),
-      [
-        ir.IrCallArg(None, ir.IrVar("__str_pfx_0")),
-        ir.IrCallArg(None, ir.IrString("cmd:")),
-      ],
-    )
-  assert list.length(guard_block) == 2
+  assert c_cmd.patterns == [[ir.IrPatStringPrefix("cmd:", Some("rest"))]]
+  assert c_cmd.prefix_bindings == [#("p", ir.IrString("cmd:"))]
+  assert c_cmd.guard
+    == Some(ir.IrBinOp(ir.IrNotEq, ir.IrVar("rest"), ir.IrString("")))
 
-  assert c_hi.patterns == [[ir.IrPatVar("__str_pfx_1")]]
+  assert c_hi.patterns == [[ir.IrPatStringPrefix("hi:", Some("rest"))]]
   assert c_wild.patterns == [[ir.IrPatDiscard]]
 
   // Shorthand variant pattern: User(name:, ..)

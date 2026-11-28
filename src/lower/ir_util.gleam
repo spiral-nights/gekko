@@ -9,10 +9,10 @@ import lower/ir.{
   IrCall, IrCallArg, IrClause, IrContinue, IrEcho, IrFn, IrFnParam, IrForLoop,
   IrGetterCall, IrList, IrMatch, IrNegateBool, IrNegateInt, IrPatArg, IrPatAs,
   IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt, IrPatString,
-  IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrStmtAssert, IrStmtExpr,
-  IrStmtGuard, IrStmtLet, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool,
-  IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult,
-  IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar, IrVar,
+  IrPatStringPrefix, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrStmtAssert,
+  IrStmtExpr, IrStmtGuard, IrStmtLet, IrTuple, IrTupleIndex, IrTypeBitArray,
+  IrTypeBool, IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed,
+  IrTypeResult, IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar, IrVar,
 }
 
 /// Return the set of mangled variable names bound by `pat`.
@@ -24,6 +24,8 @@ pub fn pattern_bound_vars(pat: IrPattern) -> Set(String) {
     | IrPatBool(_)
     | IrPatUnit
     | IrPatDiscard -> set.new()
+    IrPatStringPrefix(rest: Some(name), ..) -> set.from_list([name])
+    IrPatStringPrefix(rest: None, ..) -> set.new()
     IrPatVar(name) -> set.from_list([name])
     IrPatAs(inner, alias) -> set.insert(pattern_bound_vars(inner), alias)
     IrPatTuple(els) ->
@@ -451,6 +453,7 @@ pub fn map_pattern_children(
     IrPatInt(_)
     | IrPatFloat(_)
     | IrPatString(_)
+    | IrPatStringPrefix(_, _)
     | IrPatBool(_)
     | IrPatUnit
     | IrPatDiscard
@@ -502,6 +505,7 @@ pub fn try_fold_pattern_with(
     IrPatInt(_)
     | IrPatFloat(_)
     | IrPatString(_)
+    | IrPatStringPrefix(_, _)
     | IrPatBool(_)
     | IrPatUnit
     | IrPatDiscard

@@ -6,9 +6,9 @@ import gleam/option.{type Option, None, Some}
 import index/symbol_table.{type SymbolTable}
 import lower/bit_pattern
 import lower/ir.{
-  type IrExpr, type IrPattern, IrBool, IrCall, IrCallArg, IrModuleRef, IrPatArg,
-  IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt,
-  IrPatString, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrString, IrVar,
+  type IrExpr, type IrPattern, IrBool, IrPatArg, IrPatAs, IrPatBitString,
+  IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt, IrPatString, IrPatStringPrefix,
+  IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrString, IrVar,
 }
 import lower/mangle
 
@@ -174,22 +174,6 @@ pub fn lower_pattern(
     }
 
     glance.PatternConcatenate(prefix:, prefix_name:, rest_name:, ..) -> {
-      let synth_var = "__str_pfx_" <> int.to_string(next_id)
-      let cur_id = next_id + 1
-
-      let prefix_check =
-        IrCall(
-          function: IrModuleRef(
-            module_alias: Some("gprelude"),
-            target_module: "gprelude",
-            symbol: "string_has_prefix",
-          ),
-          args: [
-            IrCallArg(None, IrVar(synth_var)),
-            IrCallArg(None, IrString(prefix)),
-          ],
-        )
-
       let #(pfx_bindings, pfx_names) = case prefix_name {
         Some(glance.Named(p_name)) -> #(
           [#(mangle.mangle_ident(p_name), IrString(prefix))],
@@ -198,32 +182,29 @@ pub fn lower_pattern(
         Some(glance.Discarded(_)) | None -> #([], [])
       }
 
-      let #(rest_bindings, rest_names) = case rest_name {
-        glance.Named(r_name) -> {
-          let drop_call =
-            IrCall(
-              function: IrModuleRef(
-                module_alias: Some("gprelude"),
-                target_module: "gprelude",
-                symbol: "string_drop_prefix",
-              ),
-              args: [
-                IrCallArg(None, IrVar(synth_var)),
-                IrCallArg(None, IrString(prefix)),
-              ],
-            )
-          #([#(mangle.mangle_ident(r_name), drop_call)], [r_name])
-        }
-        glance.Discarded(_) -> #([], [])
+      let #(rest_opt, rest_names) = case rest_name {
+        glance.Named(r_name) -> #(Some(mangle.mangle_ident(r_name)), [r_name])
+        glance.Discarded(_) -> #(None, [])
+      }
+
+      // Lower empty prefix directly to the rest binding (or discard) so
+      // fallback arms don't trigger MoonBit's [0012] unreachable-code warning.
+      let pat = case prefix {
+        "" ->
+          case rest_opt {
+            Some(mangled_r) -> IrPatVar(mangled_r)
+            None -> IrPatDiscard
+          }
+        _ -> IrPatStringPrefix(prefix:, rest: rest_opt)
       }
 
       LoweredPattern(
-        pattern: IrPatVar(synth_var),
-        guards: [prefix_check],
-        prefix_bindings: list.append(pfx_bindings, rest_bindings),
+        pattern: pat,
+        guards: [],
+        prefix_bindings: pfx_bindings,
         bound_names: list.append(pfx_names, rest_names),
-        is_synthetic_root: True,
-        next_id: cur_id,
+        is_synthetic_root: False,
+        next_id:,
       )
     }
 

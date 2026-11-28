@@ -1338,8 +1338,48 @@ pub fn string_prefix_pattern_emits_string_view_test() {
   let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
 
   assert string.contains(mbt, "pub fn strip(s : StringView) -> StringView {")
-  assert string.contains(mbt, "@gprelude.string_has_prefix(")
-  assert string.contains(mbt, "@gprelude.string_drop_prefix(")
+  assert string.contains(mbt, "[.. \"pre:\", .. rest]")
+  assert !string.contains(mbt, "@gprelude.string_has_prefix(")
+  assert !string.contains(mbt, "@gprelude.string_drop_prefix(")
+}
+
+pub fn string_prefix_pattern_variants_and_let_assert_test() {
+  let src =
+    "pub fn classify(s: String) -> String {\n"
+    <> "  case s {\n"
+    <> "    \"a\" <> rest | \"b\" <> rest -> rest\n"
+    <> "    \"c\" <> _ -> \"c\"\n"
+    <> "    \"cmd:\" as p <> rest -> p <> rest\n"
+    <> "    \"\" <> rest -> rest\n"
+    <> "    _ -> s\n"
+    <> "  }\n"
+    <> "}\n"
+    <> "\n"
+    <> "pub fn require_http(url: String) -> String {\n"
+    <> "  let assert \"http://\" <> host = url\n"
+    <> "  host\n"
+    <> "}\n"
+
+  let assert Ok(#(ast_mod, pre)) = prepass.parse_module("str_var_mod", src)
+  let table =
+    symbol_table.index_project(
+      "str_var_pkg",
+      [#("str_var_mod", ast_mod, pre)],
+      None,
+      dict.new(),
+    )
+  let ir_mod = desugar.desugar_module(ast_mod, table, "str_var_mod")
+  let #(mbt, _) = moonbit.emit_module_with_table(ir_mod, table)
+
+  assert string.contains(
+    mbt,
+    "[.. \"a\", .. rest] | [.. \"b\", .. rest] => rest",
+  )
+  assert string.contains(mbt, "[.. \"c\", ..] => (\"c\" : StringView)")
+  assert string.contains(mbt, "[.. \"cmd:\", .. rest] => {")
+  assert string.contains(mbt, "let p = (\"cmd:\" : StringView)")
+  assert !string.contains(mbt, "[.. \"\",")
+  assert string.contains(mbt, "guard url is [.. \"http://\", .. host] else {")
 }
 
 pub fn ffi_string_and_string_view_auto_bridging_e2e_test() {

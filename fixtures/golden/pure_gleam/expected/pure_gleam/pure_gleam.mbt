@@ -28,14 +28,8 @@ pub fn run_pipeline(x : Int64) -> Int64 {
 pub fn parse_command(input : StringView) -> Result[StringView, StringView] {
   with_tag(("cmd" : StringView), fn(prefix : StringView) {
   match input {
-    __str_pfx_1 if (@gprelude.string_has_prefix(__str_pfx_1, ("cmd:" : StringView)) && ({
-  let rest = @gprelude.string_drop_prefix(__str_pfx_1, ("cmd:" : StringView))
-  (rest != ("" : StringView))
-})) => {
-      let rest = @gprelude.string_drop_prefix(__str_pfx_1, ("cmd:" : StringView))
-      Ok(((prefix + (":" : StringView)) + rest))
-    }
-    __str_pfx_2 if @gprelude.string_has_prefix(__str_pfx_2, ("cmd:" : StringView)) => Err(("empty" : StringView))
+    [.. "cmd:", .. rest] if (rest != ("" : StringView)) => Ok(((prefix + (":" : StringView)) + rest))
+    [.. "cmd:", ..] => Err(("empty" : StringView))
     _ => Err(("unknown" : StringView))
   }
 })

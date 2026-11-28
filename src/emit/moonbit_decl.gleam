@@ -18,11 +18,11 @@ import lower/ir.{
   IrGtInt, IrList, IrLtEqFloat, IrLtEqInt, IrLtFloat, IrLtInt, IrMatch,
   IrMultFloat, IrMultInt, IrNegateBool, IrNegateInt, IrNotEq, IrOr, IrPatArg,
   IrPatAs, IrPatBitString, IrPatBool, IrPatDiscard, IrPatFloat, IrPatInt,
-  IrPatString, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant, IrRemInt,
-  IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrStringConcat, IrSubFloat,
-  IrSubInt, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool, IrTypeDouble,
-  IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult, IrTypeString,
-  IrTypeTuple, IrTypeUnit, IrTypeVar, IrVar,
+  IrPatString, IrPatStringPrefix, IrPatTuple, IrPatUnit, IrPatVar, IrPatVariant,
+  IrRemInt, IrStmtAssert, IrStmtExpr, IrStmtGuard, IrStmtLet, IrStringConcat,
+  IrSubFloat, IrSubInt, IrTuple, IrTupleIndex, IrTypeBitArray, IrTypeBool,
+  IrTypeDouble, IrTypeFn, IrTypeInt64, IrTypeList, IrTypeNamed, IrTypeResult,
+  IrTypeString, IrTypeTuple, IrTypeUnit, IrTypeVar, IrVar,
 }
 import lower/ir_util
 import lower/mangle
@@ -832,6 +832,14 @@ pub fn emit_pattern(pat: IrPattern, ctx: EmitCtx) -> #(String, EmitCtx) {
     IrPatInt(val) -> #(val <> "L", ctx)
     IrPatFloat(val) -> #(val, ctx)
     IrPatString(val) -> #("\"" <> escape_string_literal(val) <> "\"", ctx)
+    IrPatStringPrefix(prefix:, rest:) -> {
+      let escaped = escape_string_literal(prefix)
+      let rest_part = case rest {
+        Some(name) -> ", .. " <> name
+        None -> ", .."
+      }
+      #("[.. \"" <> escaped <> "\"" <> rest_part <> "]", ctx)
+    }
     IrPatBool(True) -> #("true", ctx)
     IrPatBool(False) -> #("false", ctx)
     IrPatUnit -> #("_", ctx)
@@ -1029,6 +1037,7 @@ pub fn pattern_is_irrefutable(pat: IrPattern) -> Bool {
     IrPatInt(_)
     | IrPatFloat(_)
     | IrPatString(_)
+    | IrPatStringPrefix(_, _)
     | IrPatBool(_)
     | IrPatVariant(_, _, _, _, _)
     | IrPatBitString(_) -> False
